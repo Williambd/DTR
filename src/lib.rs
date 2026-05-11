@@ -221,10 +221,15 @@ fn next_node_id(dir: &Path) -> Result<String, DtrError> {
 
 /// Add a child node to the current working node.
 /// Returns the hash of the newly created node.
-pub fn add(dir: &Path, node_type: &str, code: &str) -> Result<String, DtrError> {
+/// If `marker` is provided, creates a marker pointing to the new node.
+pub fn add(dir: &Path, node_type: &str, code: &str, marker: Option<&str>) -> Result<String, DtrError> {
     validate_node_type(node_type)?;
     let current = cwn_read(dir)?;
-    add_child_to(dir, &current, node_type, code, &[])
+    let hash = add_child_to(dir, &current, node_type, code, &[])?;
+    if let Some(name) = marker {
+        set_marker(dir, &hash, name)?;
+    }
+    Ok(hash)
 }
 
 /// Add an input node. Creates a root node (no parent) and auto-generates a
@@ -237,10 +242,7 @@ pub fn add_input(dir: &Path, code: &str, marker: Option<&str>) -> Result<String,
         Some(name) => name.to_string(),
         None => auto_marker_name(dir, "input")?,
     };
-
-    let mut markers = markers_read(dir)?;
-    markers.insert(marker_name, serde_json::Value::String(node_hash.clone()));
-    markers_write(dir, &markers)?;
+    set_marker(dir, &node_hash, &marker_name)?;
 
     cwn_write(dir, &node_hash)?;
     Ok(node_hash)
@@ -248,7 +250,8 @@ pub fn add_input(dir: &Path, code: &str, marker: Option<&str>) -> Result<String,
 
 /// Add a merge node with multiple parents.
 /// `parents` can be node hashes or marker names.
-pub fn add_merge(dir: &Path, code: &str, parents: &[&str]) -> Result<String, DtrError> {
+/// If `marker` is provided, creates a marker pointing to the new node.
+pub fn add_merge(dir: &Path, code: &str, parents: &[&str], marker: Option<&str>) -> Result<String, DtrError> {
     validate_node_type(NODE_TYPE_MERGE)?;
     if parents.len() < 2 {
         return Err(DtrError::InvalidState(
@@ -290,8 +293,19 @@ pub fn add_merge(dir: &Path, code: &str, parents: &[&str]) -> Result<String, Dtr
         }
     }
 
+    if let Some(name) = marker {
+        set_marker(dir, &node_hash, name)?;
+    }
     cwn_write(dir, &node_hash)?;
     Ok(node_hash)
+}
+
+/// Set a marker name pointing to a node hash.
+fn set_marker(dir: &Path, hash: &str, name: &str) -> Result<(), DtrError> {
+    let mut markers = markers_read(dir)?;
+    markers.insert(name.to_string(), serde_json::Value::String(hash.to_string()));
+    markers_write(dir, &markers)?;
+    Ok(())
 }
 
 /// Resolve a reference string to a node hash.
@@ -1284,7 +1298,7 @@ mod tests {
         let input_hash = add_input(&dir, input_code, None).expect("add input");
 
         let chart_code = "ggplot(aes(x, y)) + geom_point()";
-        let chart_hash = add(&dir, "chart", chart_code).expect("add chart");
+        let chart_hash = add(&dir, "chart", chart_code, None).expect("add chart");
 
         // Chart node
         let chart = read_node(&dir, &chart_hash).expect("read chart");
@@ -1306,8 +1320,8 @@ mod tests {
         let dir = setup("add_model_on_chart");
 
         let _input = add_input(&dir, "read_csv('d.csv')", None).expect("add input");
-        let chart = add(&dir, "chart", "ggplot(aes(x, y)) + geom_point()").expect("add chart");
-        let model = add(&dir, "model", "glm(y ~ x, family = binomial)").expect("add model");
+        let chart = add(&dir, "chart", "ggplot(aes(x, y)) + geom_point()", None).expect("add chart");
+        let model = add(&dir, "model", "glm(y ~ x, family = binomial)", None).expect("add model");
 
         let model_node = read_node(&dir, &model).expect("read model");
         assert_eq!(model_node.node_type, "model");
@@ -1327,10 +1341,10 @@ mod tests {
         let h1 = add_input(&dir, "read_csv('a.csv')", None).expect("input");
         assert_eq!(read_cwn(&dir).unwrap(), h1);
 
-        let h2 = add(&dir, "chart", "ggplot()").expect("chart");
+        let h2 = add(&dir, "chart", "ggplot()", None).expect("chart");
         assert_eq!(read_cwn(&dir).unwrap(), h2);
 
-        let h3 = add(&dir, "model", "glm()").expect("model");
+        let h3 = add(&dir, "model", "glm()", None).expect("model");
         assert_eq!(read_cwn(&dir).unwrap(), h3);
     }
 
@@ -1350,7 +1364,7 @@ mod tests {
         cwn_write(&dir, &left).expect("write cwn");
 
         let merge_code = "inner_join(right, by = 'id')";
-        let merge_hash = add_merge(&dir, merge_code, &[&left, &right]).expect("add merge");
+        let merge_hash = add_merge(&dir, merge_code, &[&left, &right], None).expect("add merge");
 
         let merge_node = read_node(&dir, &merge_hash).expect("read merge");
         assert_eq!(merge_node.node_type, "merge");
@@ -1375,7 +1389,7 @@ mod tests {
         let right = add_input(&dir, "read_csv('right.csv')", Some("right")).expect("right");
 
         // Use marker names instead of hashes
-        let merge_hash = add_merge(&dir, "inner_join(right, by = 'id')", &["left", "right"])
+        let merge_hash = add_merge(&dir, "inner_join(right, by = 'id')", &["left", "right"], None)
             .expect("add merge by markers");
 
         let merge_node = read_node(&dir, &merge_hash).expect("read merge");
@@ -1392,7 +1406,7 @@ mod tests {
 
         // Mix: left by hash, right by marker name
         let merge_hash =
-            add_merge(&dir, "inner_join(right, by = 'id')", &[&left, "right"]).expect("add merge");
+            add_merge(&dir, "inner_join(right, by = 'id')", &[&left, "right"], None).expect("add merge");
 
         let merge_node = read_node(&dir, &merge_hash).expect("read merge");
         assert_eq!(merge_node.parents, vec![left, right]);
@@ -1404,7 +1418,7 @@ mod tests {
 
         let _left = add_input(&dir, "read_csv('left.csv')", Some("left")).expect("left");
 
-        let result = add_merge(&dir, "inner_join()", &["left", "nonexistent"]);
+        let result = add_merge(&dir, "inner_join()", &["left", "nonexistent"], None);
         assert!(result.is_err(), "bad marker should error");
         match result {
             Err(DtrError::NodeNotFound(name)) => assert!(name.contains("nonexistent")),
@@ -1418,7 +1432,7 @@ mod tests {
 
         let input = add_input(&dir, "read_csv('d.csv')", None).expect("add input");
 
-        let result = add_merge(&dir, "inner_join()", &[&input]);
+        let result = add_merge(&dir, "inner_join()", &[&input], None);
         assert!(result.is_err(), "merge with one parent should error");
         match result {
             Err(DtrError::InvalidState(msg)) => assert!(msg.contains("at least 2 parents")),
@@ -1430,7 +1444,7 @@ mod tests {
     fn test_add_merge_errors_with_nonexistent_parent() {
         let dir = setup("merge_bad_parent");
 
-        let result = add_merge(&dir, "inner_join()", &["deadbeef", "cafebabe"]);
+        let result = add_merge(&dir, "inner_join()", &["deadbeef", "cafebabe"], None);
         assert!(result.is_err(), "merge with bad parents should error");
         match result {
             Err(DtrError::NodeNotFound(_)) => {} // expected
@@ -1447,7 +1461,7 @@ mod tests {
         let dir = setup("add_no_cwn");
 
         // CWN is empty after init — adding a chart (non-input) should fail
-        let result = add(&dir, "chart", "ggplot()");
+        let result = add(&dir, "chart", "ggplot()", None);
         assert!(result.is_err(), "add with no CWN should error");
         match result {
             Err(DtrError::NoCurrentNode) => {} // expected
@@ -1471,7 +1485,7 @@ mod tests {
         let result = add_input(&dir, "read_csv('d.csv')", None);
         assert!(result.is_ok(), "input is valid");
 
-        let result = add(&dir, "invalid_type", "some code");
+        let result = add(&dir, "invalid_type", "some code", None);
         assert!(result.is_err(), "invalid node type should error");
         match result {
             Err(DtrError::InvalidNodeType(t)) => assert_eq!(t, "invalid_type"),
@@ -1484,7 +1498,7 @@ mod tests {
         let dir = setup("add_process_valid");
 
         let input = add_input(&dir, "read_csv('data.csv')", None).expect("add input");
-        let result = add(&dir, "process", "mutate(z = x + y)");
+        let result = add(&dir, "process", "mutate(z = x + y)", None);
         assert!(result.is_ok(), "process should be a valid node type");
 
         let process_hash = result.unwrap();
@@ -1498,8 +1512,8 @@ mod tests {
         let dir = setup("add_process_chain");
 
         let _input = add_input(&dir, "read_csv('data.csv')", None).expect("add input");
-        let process = add(&dir, "process", "filter(x > 0)").expect("add filter");
-        let chart = add(&dir, "chart", "ggplot(aes(x, y)) + geom_point()").expect("add chart");
+        let process = add(&dir, "process", "filter(x > 0)", None).expect("add filter");
+        let chart = add(&dir, "chart", "ggplot(aes(x, y)) + geom_point()", None).expect("add chart");
 
         let process_node = read_node(&dir, &process).expect("read process");
         assert_eq!(process_node.node_type, "process");
@@ -1511,13 +1525,87 @@ mod tests {
     }
 
     #[test]
+    fn test_add_process_with_marker() {
+        let dir = setup("add_process_marker");
+
+        let input = add_input(&dir, "read_csv('data.csv')", None).expect("input");
+        let hash = add(&dir, "process", "filter(x > 0)", Some("filtered")).expect("process");
+
+        let markers = read_markers(&dir).expect("read markers");
+        assert_eq!(
+            markers.get("filtered"),
+            Some(&serde_json::Value::String(hash.clone())),
+            "marker should point to process node"
+        );
+    }
+
+    #[test]
+    fn test_add_chart_with_marker() {
+        let dir = setup("add_chart_marker");
+
+        let _input = add_input(&dir, "read_csv('data.csv')", None).expect("input");
+        let hash = add(&dir, "chart", "ggplot(aes(x,y)) + geom_point()", Some("myplot")).expect("chart");
+
+        let markers = read_markers(&dir).expect("read markers");
+        assert_eq!(
+            markers.get("myplot"),
+            Some(&serde_json::Value::String(hash)),
+            "marker should point to chart node"
+        );
+    }
+
+    #[test]
+    fn test_add_model_with_marker() {
+        let dir = setup("add_model_marker");
+
+        let _input = add_input(&dir, "read_csv('data.csv')", None).expect("input");
+        let hash = add(&dir, "model", "glm(y ~ x)", Some("mymodel")).expect("model");
+
+        let markers = read_markers(&dir).expect("read markers");
+        assert_eq!(
+            markers.get("mymodel"),
+            Some(&serde_json::Value::String(hash)),
+            "marker should point to model node"
+        );
+    }
+
+    #[test]
+    fn test_add_merge_with_marker() {
+        let dir = setup("add_merge_marker");
+
+        let left = add_input(&dir, "read_csv('left.csv')", Some("left")).expect("left");
+        let right = add_input(&dir, "read_csv('right.csv')", Some("right")).expect("right");
+        let hash = add_merge(&dir, "inner_join(right, by = 'id')", &[&left, &right], Some("joined")).expect("merge");
+
+        let markers = read_markers(&dir).expect("read markers");
+        assert_eq!(
+            markers.get("joined"),
+            Some(&serde_json::Value::String(hash)),
+            "marker should point to merge node"
+        );
+    }
+
+    #[test]
+    fn test_add_process_without_marker_no_side_effect() {
+        let dir = setup("add_process_no_marker");
+
+        let _input = add_input(&dir, "read_csv('data.csv')", None).expect("input");
+        add(&dir, "process", "filter(x > 0)", None).expect("process");
+
+        let markers = read_markers(&dir).expect("read markers");
+        // Only the auto-generated input_1 marker should exist
+        assert_eq!(markers.len(), 1, "no extra markers created");
+        assert!(markers.contains_key("input_1"), "only input_1 marker");
+    }
+
+    #[test]
     fn test_add_errors_on_nonexistent_parent() {
         let dir = setup("add_bad_parent");
 
         // Manually write a bad CWN
         cwn_write(&dir, "nonexistent_hash").expect("write bad cwn");
 
-        let result = add(&dir, "chart", "ggplot()");
+        let result = add(&dir, "chart", "ggplot()", None);
         assert!(result.is_err(), "add with bad parent should error");
         match result {
             Err(DtrError::NodeNotFound(_)) => {} // expected
@@ -1562,7 +1650,7 @@ mod tests {
         let dir = setup("goto_parent");
 
         let input = add_input(&dir, "read_csv('data.csv')", None).expect("input");
-        let _chart = add(&dir, "chart", "ggplot()").expect("chart");
+        let _chart = add(&dir, "chart", "ggplot()", None).expect("chart");
 
         // CWN is at chart. Goto parent should move to input.
         goto(&dir, "..").expect("goto parent");
@@ -1574,7 +1662,7 @@ mod tests {
         let dir = setup("goto_child");
 
         let input = add_input(&dir, "read_csv('data.csv')", None).expect("input");
-        let chart = add(&dir, "chart", "ggplot()").expect("chart");
+        let chart = add(&dir, "chart", "ggplot()", None).expect("chart");
 
         // Move back to input, then goto child
         goto(&dir, &input).expect("goto input");
@@ -1588,7 +1676,7 @@ mod tests {
 
         let left = add_input(&dir, "read_csv('left.csv')", None).expect("left");
         let right = add_input(&dir, "read_csv('right.csv')", None).expect("right");
-        add_merge(&dir, "inner_join()", &[&left, &right]).expect("merge");
+        add_merge(&dir, "inner_join()", &[&left, &right], None).expect("merge");
 
         // CWN is at merge with two parents. Goto .. should error.
         let result = goto(&dir, "..");
@@ -1609,11 +1697,11 @@ mod tests {
         let dir = setup("goto_multi_child");
 
         let input = add_input(&dir, "read_csv('data.csv')", None).expect("input");
-        let _chart = add(&dir, "chart", "ggplot()").expect("chart");
+        let _chart = add(&dir, "chart", "ggplot()", None).expect("chart");
 
         // Go back to input, then branch again
         goto(&dir, &input).expect("goto input");
-        let _model = add(&dir, "model", "glm(y ~ x)").expect("model");
+        let _model = add(&dir, "model", "glm(y ~ x)", None).expect("model");
 
         // CWN is at model. Goto back to input which now has 2 children.
         goto(&dir, &input).expect("goto input");
@@ -1650,7 +1738,7 @@ mod tests {
         let dir = setup("goto_child_leaf");
 
         let _input = add_input(&dir, "read_csv('data.csv')", None).expect("input");
-        let _chart = add(&dir, "chart", "ggplot()").expect("chart");
+        let _chart = add(&dir, "chart", "ggplot()", None).expect("chart");
 
         // CWN is at chart (leaf, no children)
         let result = goto(&dir, ".");
@@ -1862,7 +1950,7 @@ mod tests {
 
         let _input = add_input(&dir, "read_csv('d.csv')", None).expect("add input");
         let chart_code = "ggplot(aes(x, y)) + geom_point()";
-        let _chart = add(&dir, "chart", chart_code).expect("add chart");
+        let _chart = add(&dir, "chart", chart_code, None).expect("add chart");
 
         let result = read_current(&dir).expect("read current");
         assert_eq!(result, chart_code, "should return chart code");
@@ -1968,7 +2056,7 @@ mod tests {
         let input_hash = add_input(&dir, input_code, None).expect("add input");
 
         let chart_code = "ggplot(aes(x, y)) + geom_point()";
-        let chart_hash = add(&dir, "chart", chart_code).expect("add chart");
+        let chart_hash = add(&dir, "chart", chart_code, None).expect("add chart");
 
         // Move CWN back to the input node before writing
         cwn_write(&dir, &input_hash).expect("write cwn back to input");
@@ -1998,7 +2086,7 @@ mod tests {
         let input_hash = add_input(&dir, input_code, None).expect("add input");
 
         let chart_code = "ggplot(aes(x, y)) + geom_point()";
-        let chart_hash = add(&dir, "chart", chart_code).expect("add chart");
+        let chart_hash = add(&dir, "chart", chart_code, None).expect("add chart");
 
         // We are at the chart node. Write new code to it.
         let new_code = "ggplot(aes(x, y)) + geom_smooth()";
@@ -2068,8 +2156,8 @@ mod tests {
         let dir = setup("write_clear_descendants");
 
         let input = add_input(&dir, "read_csv('data.csv')", None).expect("input");
-        let process = add(&dir, "process", "filter(x > 0)").expect("process");
-        let chart = add(&dir, "chart", "ggplot()").expect("chart");
+        let process = add(&dir, "process", "filter(x > 0)", None).expect("process");
+        let chart = add(&dir, "chart", "ggplot()", None).expect("chart");
 
         // Cache the process and chart nodes
         node_cache_set(&dir, &process, "abc123").expect("cache process");
@@ -2093,11 +2181,11 @@ mod tests {
 
         // Build: input → process → chart, and input → process → model (branch)
         let input = add_input(&dir, "read_csv('data.csv')", None).expect("input");
-        let process = add(&dir, "process", "filter(x > 0)").expect("process");
-        let chart = add(&dir, "chart", "ggplot()").expect("chart");
+        let process = add(&dir, "process", "filter(x > 0)", None).expect("process");
+        let chart = add(&dir, "chart", "ggplot()", None).expect("chart");
 
         cwn_write(&dir, &process).expect("goto process");
-        let model = add(&dir, "model", "glm(y ~ x)").expect("model");
+        let model = add(&dir, "model", "glm(y ~ x)", None).expect("model");
 
         // Cache the process and both children
         node_cache_set(&dir, &process, "aaa").expect("cache process");
@@ -2291,7 +2379,7 @@ mod tests {
         let dir = setup("run_no_cache");
 
         let _input = add_input(&dir, "read_csv('data.csv')", None).expect("input");
-        let _chart = add(&dir, "chart", "ggplot()").expect("chart");
+        let _chart = add(&dir, "chart", "ggplot()", None).expect("chart");
 
         // No cache set — should compose full chain
         let cwn = read_cwn(&dir).unwrap();
@@ -2316,7 +2404,7 @@ mod tests {
         fs::create_dir_all(dtr_path(&dir).join("cache")).expect("mkdir cache");
         fs::write(dtr_path(&dir).join("cache").join("cafecafe"), "fake rds").expect("write cache");
 
-        let _chart = add(&dir, "chart", "ggplot()").expect("chart");
+        let _chart = add(&dir, "chart", "ggplot()", None).expect("chart");
 
         // Should use readRDS instead of read_csv
         let cwn = read_cwn(&dir).unwrap();
@@ -2338,7 +2426,7 @@ mod tests {
         // Set cache hash but don't create the file
         node_cache_set(&dir, &input, "deadbeef").expect("set cache");
 
-        let _chart = add(&dir, "chart", "ggplot()").expect("chart");
+        let _chart = add(&dir, "chart", "ggplot()", None).expect("chart");
 
         let cwn = read_cwn(&dir).unwrap();
         let script = compose_node_cached(&dir, &cwn).expect("compose cached");
@@ -2355,8 +2443,8 @@ mod tests {
         let dir = setup("run_mid_chain");
 
         let _input = add_input(&dir, "read_csv('data.csv')", None).expect("input");
-        let proc_hash = add(&dir, "process", "filter(x > 0)").expect("process");
-        let _chart = add(&dir, "chart", "ggplot()").expect("chart");
+        let proc_hash = add(&dir, "process", "filter(x > 0)", None).expect("process");
+        let _chart = add(&dir, "chart", "ggplot()", None).expect("chart");
 
         // Cache the process node (mid-chain)
         fs::create_dir_all(dtr_path(&dir).join("cache")).expect("mkdir");
@@ -2489,7 +2577,7 @@ mod tests {
         let dir = setup("delete_to_parent");
 
         let input = add_input(&dir, "read_csv('data.csv')", None).expect("add input");
-        let chart = add(&dir, "chart", "ggplot(aes(x, y)) + geom_point()").expect("add chart");
+        let chart = add(&dir, "chart", "ggplot(aes(x, y)) + geom_point()", None).expect("add chart");
 
         // CWN is chart. Delete it.
         delete_current(&dir, false).expect("delete chart");
@@ -2533,7 +2621,7 @@ mod tests {
         let dir = setup("delete_with_children");
 
         let _input = add_input(&dir, "read_csv('data.csv')", None).expect("add input");
-        let _chart = add(&dir, "chart", "ggplot(aes(x, y)) + geom_point()").expect("add chart");
+        let _chart = add(&dir, "chart", "ggplot(aes(x, y)) + geom_point()", None).expect("add chart");
 
         // Go back to input (which now has a child)
         let _ = read_cwn(&dir); // CWN is at chart
@@ -2564,8 +2652,8 @@ mod tests {
         let dir = setup("delete_recursive_chain");
 
         let input = add_input(&dir, "read_csv('data.csv')", None).expect("add input");
-        let chart = add(&dir, "chart", "ggplot(aes(x, y)) + geom_point()").expect("add chart");
-        let model = add(&dir, "model", "glm(y ~ x)").expect("add model");
+        let chart = add(&dir, "chart", "ggplot(aes(x, y)) + geom_point()", None).expect("add chart");
+        let model = add(&dir, "model", "glm(y ~ x)", None).expect("add model");
 
         // Now at model. Go back to input and delete recursively.
         cwn_write(&dir, &input).expect("move to input");
@@ -2587,9 +2675,9 @@ mod tests {
 
         // Create: input -> chart, input -> model (branching)
         let input = add_input(&dir, "read_csv('data.csv')", None).expect("add input");
-        let chart = add(&dir, "chart", "ggplot(aes(x, y)) + geom_point()").expect("add chart");
+        let chart = add(&dir, "chart", "ggplot(aes(x, y)) + geom_point()", None).expect("add chart");
         cwn_write(&dir, &input).expect("back to input");
-        let model = add(&dir, "model", "glm(y ~ x)").expect("add model");
+        let model = add(&dir, "model", "glm(y ~ x)", None).expect("add model");
 
         // Delete input recursively
         cwn_write(&dir, &input).expect("move to input");
@@ -2634,7 +2722,7 @@ mod tests {
         let dir = setup("delete_parent_refs");
 
         let input = add_input(&dir, "read_csv('data.csv')", None).expect("add input");
-        let chart = add(&dir, "chart", "ggplot(aes(x, y)) + geom_point()").expect("add chart");
+        let chart = add(&dir, "chart", "ggplot(aes(x, y)) + geom_point()", None).expect("add chart");
 
         // Go back to input and delete chart
         cwn_write(&dir, &input).expect("move to input");
@@ -2681,8 +2769,8 @@ mod tests {
         let dir = setup("delete_recursive_cache");
 
         let input = add_input(&dir, "read_csv('data.csv')", None).expect("input");
-        let process = add(&dir, "process", "filter(x > 0)").expect("process");
-        let chart = add(&dir, "chart", "ggplot()").expect("chart");
+        let process = add(&dir, "process", "filter(x > 0)", None).expect("process");
+        let chart = add(&dir, "chart", "ggplot()", None).expect("chart");
 
         // Cache all three nodes
         fs::create_dir_all(dtr_path(&dir).join("cache")).expect("mkdir");
@@ -2723,8 +2811,8 @@ mod tests {
         let dir = setup("compose_linear");
 
         let _input = add_input(&dir, "read_csv('data.csv')", None).expect("add input");
-        let _filter = add(&dir, "process", "filter(x > 0)").expect("add filter");
-        let _chart = add(&dir, "chart", "ggplot(aes(x, y)) + geom_point()").expect("add chart");
+        let _filter = add(&dir, "process", "filter(x > 0)", None).expect("add filter");
+        let _chart = add(&dir, "chart", "ggplot(aes(x, y)) + geom_point()", None).expect("add chart");
 
         let result = compose(&dir).expect("compose");
         let expected = "read_csv('data.csv') |>\n  filter(x > 0) |>\n  ggplot(aes(x, y)) + geom_point()";
@@ -2736,7 +2824,7 @@ mod tests {
         let dir = setup("compose_input_process");
 
         let _input = add_input(&dir, "read_csv('data.csv')", None).expect("add input");
-        let _mut = add(&dir, "process", "mutate(z = x + y)").expect("add mutate");
+        let _mut = add(&dir, "process", "mutate(z = x + y)", None).expect("add mutate");
 
         let result = compose(&dir).expect("compose");
         assert_eq!(
@@ -2751,7 +2839,7 @@ mod tests {
         let dir = setup("compose_input_model");
 
         let _input = add_input(&dir, "read_csv('data.csv')", None).expect("add input");
-        let _model = add(&dir, "model", "glm(y ~ x, family = binomial)").expect("add model");
+        let _model = add(&dir, "model", "glm(y ~ x, family = binomial)", None).expect("add model");
 
         let result = compose(&dir).expect("compose");
         assert_eq!(
@@ -2769,7 +2857,7 @@ mod tests {
         let right_hash = add_input(&dir, "read_csv('right.csv')", Some("right")).expect("right input");
 
         let merge_code = "inner_join(right, by = 'id')";
-        add_merge(&dir, merge_code, &[&left_hash, &right_hash]).expect("add merge");
+        add_merge(&dir, merge_code, &[&left_hash, &right_hash], None).expect("add merge");
 
         let result = compose(&dir).expect("compose");
         let expected = "right <- read_csv('right.csv')\n\nread_csv('left.csv') |>\n  inner_join(right, by = 'id')";
@@ -2789,7 +2877,7 @@ mod tests {
         // The variable name is derived from the right input's hash at merge creation
         let right_var = format!("p_{}", &right[..8.min(right.len())]);
         let merge_code = format!("inner_join({right_var}, by = 'id')");
-        add_merge(&dir, &merge_code, &[&left, &right]).expect("add merge");
+        add_merge(&dir, &merge_code, &[&left, &right], None).expect("add merge");
 
         let result = compose(&dir).expect("compose");
         let expected = format!(
@@ -2807,13 +2895,13 @@ mod tests {
         let _ = right;
 
         // Process the right branch, then give the processed node a marker
-        let _right_proc = add(&dir, "process", "filter(x > 0)").expect("right filter");
+        let _right_proc = add(&dir, "process", "filter(x > 0)", None).expect("right filter");
         let right_proc_hash = read_cwn(&dir).expect("read cwn");
         add_marker(&dir, "right_filtered").expect("mark processed right");
 
         // Merge: left as primary, processed-right as side
         let merge_code = "inner_join(right_filtered, by = 'id')";
-        add_merge(&dir, merge_code, &[&left, &right_proc_hash]).expect("add merge");
+        add_merge(&dir, merge_code, &[&left, &right_proc_hash], None).expect("add merge");
 
         let result = compose(&dir).expect("compose");
         let expected = "right_filtered <- read_csv('right.csv') |>\n  filter(x > 0)\n\nread_csv('left.csv') |>\n  inner_join(right_filtered, by = 'id')";
@@ -2826,8 +2914,8 @@ mod tests {
 
         let left = add_input(&dir, "read_csv('left.csv')", Some("left")).expect("left");
         let right = add_input(&dir, "read_csv('right.csv')", Some("right")).expect("right");
-        add_merge(&dir, "inner_join(right, by = 'id')", &[&left, &right]).expect("merge");
-        add(&dir, "chart", "ggplot(aes(x, y)) + geom_point()").expect("chart");
+        add_merge(&dir, "inner_join(right, by = 'id')", &[&left, &right], None).expect("merge");
+        add(&dir, "chart", "ggplot(aes(x, y)) + geom_point()", None).expect("chart");
 
         let result = compose(&dir).expect("compose");
         let expected = concat!(
@@ -2845,10 +2933,10 @@ mod tests {
         let dir = setup("compose_deep");
 
         let _input = add_input(&dir, "read_csv('data.csv')", None).expect("input");
-        let _f1 = add(&dir, "process", "filter(x > 0)").expect("filter");
-        let _mut = add(&dir, "process", "mutate(z = x + y)").expect("mutate");
-        let _sel = add(&dir, "process", "select(x, y, z)").expect("select");
-        let _chart = add(&dir, "chart", "ggplot(aes(x, z)) + geom_point()").expect("chart");
+        let _f1 = add(&dir, "process", "filter(x > 0)", None).expect("filter");
+        let _mut = add(&dir, "process", "mutate(z = x + y)", None).expect("mutate");
+        let _sel = add(&dir, "process", "select(x, y, z)", None).expect("select");
+        let _chart = add(&dir, "chart", "ggplot(aes(x, z)) + geom_point()", None).expect("chart");
 
         let result = compose(&dir).expect("compose");
         let expected = concat!(
@@ -2895,7 +2983,7 @@ mod tests {
         let c = add_input(&dir, "read_csv('c.csv')", Some("third")).expect("c");
 
         // Merge with 3 parents: a is primary, b and c are side
-        add_merge(&dir, "inner_join(second, by='id') |> inner_join(third, by='x')", &[&a, &b, &c])
+        add_merge(&dir, "inner_join(second, by='id', None) |> inner_join(third, by='x')", &[&a, &b, &c], None)
             .expect("merge");
 
         let result = compose(&dir).expect("compose");
@@ -2934,11 +3022,11 @@ mod tests {
         let c = add_input(&dir, "read_csv('c.csv')", Some("c")).expect("c");
 
         // merge1 uses b as side parent
-        add_merge(&dir, "inner_join(b, by='id')", &[&a, &b]).expect("merge1");
+        add_merge(&dir, "inner_join(b, by='id')", &[&a, &b], None).expect("merge1");
         let merge1_hash = read_cwn(&dir).expect("read cwn");
 
         // merge3 uses c as side parent, merge1 as primary
-        add_merge(&dir, "inner_join(c, by='x')", &[&merge1_hash, &c]).expect("merge3");
+        add_merge(&dir, "inner_join(c, by='x')", &[&merge1_hash, &c], None).expect("merge3");
 
         let result = compose(&dir).expect("compose");
 
@@ -2986,12 +3074,12 @@ mod tests {
 
         // merge1: b is side parent
         let merge1_code = format!("inner_join({b_var}, by='id')");
-        add_merge(&dir, &merge1_code, &[&a, &b]).expect("merge1");
+        add_merge(&dir, &merge1_code, &[&a, &b], None).expect("merge1");
         let merge1_hash = read_cwn(&dir).expect("read cwn");
 
         // merge3: c is side parent, merge1 is primary
         let merge3_code = format!("inner_join({c_var}, by='x')");
-        add_merge(&dir, &merge3_code, &[&merge1_hash, &c]).expect("merge3");
+        add_merge(&dir, &merge3_code, &[&merge1_hash, &c], None).expect("merge3");
 
         let result = compose(&dir).expect("compose");
 
@@ -3138,8 +3226,8 @@ mod tests {
         let dir = setup("clear_cache_children");
 
         let input = add_input(&dir, "read_csv('data.csv')", None).expect("input");
-        let process = add(&dir, "process", "filter(x > 0)").expect("process");
-        let chart = add(&dir, "chart", "ggplot()").expect("chart");
+        let process = add(&dir, "process", "filter(x > 0)", None).expect("process");
+        let chart = add(&dir, "chart", "ggplot()", None).expect("chart");
 
         // Cache process and chart
         fs::create_dir_all(dtr_path(&dir).join("cache")).expect("mkdir");
@@ -3165,8 +3253,8 @@ mod tests {
         let dir = setup("clear_cache_parents");
 
         let input = add_input(&dir, "read_csv('data.csv')", None).expect("input");
-        let process = add(&dir, "process", "filter(x > 0)").expect("process");
-        let chart = add(&dir, "chart", "ggplot()").expect("chart");
+        let process = add(&dir, "process", "filter(x > 0)", None).expect("process");
+        let chart = add(&dir, "chart", "ggplot()", None).expect("chart");
 
         // Cache input and process
         fs::create_dir_all(dtr_path(&dir).join("cache")).expect("mkdir");
@@ -3190,7 +3278,7 @@ mod tests {
 
         let a = add_input(&dir, "read_csv('a.csv')", None).expect("a");
         let b = add_input(&dir, "read_csv('b.csv')", None).expect("b");
-        add_merge(&dir, "inner_join(input_2, by='id')", &[&a, &b]).expect("merge");
+        add_merge(&dir, "inner_join(input_2, by='id', None)", &[&a, &b], None).expect("merge");
 
         // Cache all three
         fs::create_dir_all(dtr_path(&dir).join("cache")).expect("mkdir");
@@ -3239,8 +3327,8 @@ mod tests {
         let dir = setup("clear_cache_both");
 
         let input = add_input(&dir, "read_csv('data.csv')", None).expect("input");
-        let process = add(&dir, "process", "filter(x > 0)").expect("process");
-        let chart = add(&dir, "chart", "ggplot()").expect("chart");
+        let process = add(&dir, "process", "filter(x > 0)", None).expect("process");
+        let chart = add(&dir, "chart", "ggplot()", None).expect("chart");
 
         // Cache all three
         fs::create_dir_all(dtr_path(&dir).join("cache")).expect("mkdir");
@@ -3287,7 +3375,7 @@ mod tests {
 
         let a = add_input(&dir, "read_csv('a.csv')", Some("alpha")).expect("a");
         let b = add_input(&dir, "read_csv('b.csv')", Some("beta")).expect("b");
-        let _process = add(&dir, "process", "filter(x > 0)").expect("process");
+        let _process = add(&dir, "process", "filter(x > 0)", None).expect("process");
 
         let json = map(&dir, false, false).expect("map all");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
@@ -3327,12 +3415,12 @@ mod tests {
         let dir = setup("map_rc");
 
         let input = add_input(&dir, "read_csv('data.csv')", None).expect("input");
-        let process = add(&dir, "process", "filter(x > 0)").expect("process");
-        let chart = add(&dir, "chart", "ggplot()").expect("chart");
+        let process = add(&dir, "process", "filter(x > 0)", None).expect("process");
+        let chart = add(&dir, "chart", "ggplot()", None).expect("chart");
 
         // Branch from input to create a sibling subtree
         cwn_write(&dir, &input).expect("goto input");
-        let model = add(&dir, "model", "glm(y ~ x)").expect("model");
+        let model = add(&dir, "model", "glm(y ~ x)", None).expect("model");
 
         // Put CWN at process. -rc should give process + chart (descendants
         // of process), but NOT input (ancestor) or model (sibling branch).
@@ -3353,12 +3441,12 @@ mod tests {
         let dir = setup("map_rp");
 
         let input = add_input(&dir, "read_csv('data.csv')", None).expect("input");
-        let process = add(&dir, "process", "filter(x > 0)").expect("process");
-        let chart = add(&dir, "chart", "ggplot()").expect("chart");
+        let process = add(&dir, "process", "filter(x > 0)", None).expect("process");
+        let chart = add(&dir, "chart", "ggplot()", None).expect("chart");
 
         // Branch from process
         cwn_write(&dir, &process).expect("goto process");
-        let model = add(&dir, "model", "glm(y ~ x)").expect("model");
+        let model = add(&dir, "model", "glm(y ~ x)", None).expect("model");
 
         // CWN is at model. Map -rp should give model, process, input
         // but NOT chart.
@@ -3415,7 +3503,7 @@ mod tests {
 
         let left = add_input(&dir, "read_csv('left.csv')", Some("left")).expect("left");
         let right = add_input(&dir, "read_csv('right.csv')", Some("right")).expect("right");
-        add_merge(&dir, "inner_join(right, by='id')", &[&left, &right]).expect("merge");
+        add_merge(&dir, "inner_join(right, by='id', None)", &[&left, &right], None).expect("merge");
         let merge_hash = read_cwn(&dir).unwrap();
 
         let json = map(&dir, false, false).expect("map all");

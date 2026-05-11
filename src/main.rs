@@ -217,6 +217,9 @@ enum AddKind {
     Process {
         /// R code for the dplyr transform
         code: String,
+        /// Optional marker name for the new node
+        #[arg(short = 'm')]
+        marker: Option<String>,
     },
 
     /// Add a chart node (ggplot2 visualization).
@@ -225,6 +228,9 @@ enum AddKind {
     Chart {
         /// R code for the chart
         code: String,
+        /// Optional marker name for the new node
+        #[arg(short = 'm')]
+        marker: Option<String>,
     },
 
     /// Add a model node (statistical model fitting).
@@ -234,6 +240,9 @@ enum AddKind {
     Model {
         /// R code for the model
         code: String,
+        /// Optional marker name for the new node
+        #[arg(short = 'm')]
+        marker: Option<String>,
     },
 
     /// Add a merge node (joins multiple parent outputs).
@@ -246,6 +255,9 @@ enum AddKind {
         code: String,
         /// Parent node IDs or marker names (at least 2)
         parents: Vec<String>,
+        /// Optional marker name for the new node
+        #[arg(short = 'm')]
+        marker: Option<String>,
     },
 }
 
@@ -259,24 +271,24 @@ fn exec(dir: &std::path::Path) -> Result<(), dtr::DtrError> {
                 println!("added input node {hash}");
                 Ok(())
             }
-            AddKind::Process { code } => {
-                let hash = dtr::add(dir, "process", &code)?;
+            AddKind::Process { code, marker } => {
+                let hash = dtr::add(dir, "process", &code, marker.as_deref())?;
                 println!("added process node {hash}");
                 Ok(())
             }
-            AddKind::Chart { code } => {
-                let hash = dtr::add(dir, "chart", &code)?;
+            AddKind::Chart { code, marker } => {
+                let hash = dtr::add(dir, "chart", &code, marker.as_deref())?;
                 println!("added chart node {hash}");
                 Ok(())
             }
-            AddKind::Model { code } => {
-                let hash = dtr::add(dir, "model", &code)?;
+            AddKind::Model { code, marker } => {
+                let hash = dtr::add(dir, "model", &code, marker.as_deref())?;
                 println!("added model node {hash}");
                 Ok(())
             }
-            AddKind::Merge { code, parents } => {
+            AddKind::Merge { code, parents, marker } => {
                 let refs: Vec<&str> = parents.iter().map(|s| s.as_str()).collect();
-                let hash = dtr::add_merge(dir, &code, &refs)?;
+                let hash = dtr::add_merge(dir, &code, &refs, marker.as_deref())?;
                 println!("added merge node {hash}");
                 Ok(())
             }
