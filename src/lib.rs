@@ -67,7 +67,7 @@ impl From<serde_json::Error> for DtrError {
 
 /// Initialize a DTR project in the given directory.
 /// Creates the `.dtr` directory structure with empty blobs/, nodes/, cache/
-/// directories, an empty CWN file, an empty cwnout file, a next_id counter,
+/// directories, an empty CWN file, a next_id counter,
 /// an empty markers JSON object, and an empty packages list.
 pub fn init(dir: &Path) -> Result<(), DtrError> {
     let dtr_path = dir.join(DTR_DIR);
@@ -79,11 +79,6 @@ pub fn init(dir: &Path) -> Result<(), DtrError> {
     let cwn_path = dtr_path.join("CWN");
     if !cwn_path.exists() {
         fs::write(&cwn_path, "")?;
-    }
-
-    let cwnout_path = dtr_path.join("cwnout");
-    if !cwnout_path.exists() {
-        fs::write(&cwnout_path, "")?;
     }
 
     let next_id_path = dtr_path.join("next_id");
@@ -699,8 +694,7 @@ fn compose_node_cached(dir: &Path, hash: &str) -> Result<String, DtrError> {
 /// Run the current working node.
 /// If `force` is true, recomputes all ancestors from scratch (`dtr run -r`).
 /// Otherwise, stops recursing at cached ancestors and uses their stored
-/// RDS output (`dtr run`). Writes text output to `.dtr/cwnout` and
-/// an RDS file to `.dtr/cache/<hash>` for future caching.
+/// RDS output (`dtr run`). Caches the result as RDS in `.dtr/cache/<hash>`.
 /// Returns the text output.
 pub fn run(dir: &Path, force: bool) -> Result<String, DtrError> {
     let hash = cwn_read(dir)?;
@@ -719,9 +713,6 @@ pub fn run(dir: &Path, force: bool) -> Result<String, DtrError> {
 
     // Execute via Rscript
     let output = execute_r_script(&script)?;
-
-    // Write text output to cwnout
-    fs::write(dtr_path(dir).join("cwnout"), &output)?;
 
     // Cache the RDS result if it was created
     if let Ok(rds_bytes) = fs::read(&tmp_rds) {
@@ -814,6 +805,84 @@ pub fn cache(dir: &Path) -> Result<String, DtrError> {
     node_write(dir, &hash, &node)?;
 
     Ok(cache_hash)
+}
+
+/// Result of previewing a cached RDS object.
+pub enum PreviewOutput {
+    /// Plain text output (tibble preview, model summary, etc.)
+    Text(String),
+    /// Raw PNG bytes (ggplot objects rendered to raster)
+    Png(Vec<u8>),
+}
+
+/// Preview the cached RDS output of a node.
+///
+/// If `target` is None, previews the current working node.
+/// Otherwise resolves a node ID or marker name.
+///
+/// Behavior depends on the R object type:
+/// - tibble / data.frame → text preview (head 20 rows)
+/// - ggplot → raw PNG bytes
+/// - model (lm, glm, etc.) → summary text
+/// - other → print() output
+pub fn preview(dir: &Path, target: Option<&str>) -> Result<PreviewOutput, DtrError> {
+    let hash = match target {
+        Some(t) => resolve_ref(dir, t)?,
+        None => cwn_read(dir)?,
+    };
+
+    let node = node_read(dir, &hash)?;
+    let cache_hash = node.cache.as_ref().ok_or_else(|| {
+        DtrError::InvalidState(
+            "node has no cached output (run dtr run or dtr cache first)".to_string(),
+        )
+    })?;
+
+    let cache_path = dtr_path(dir).join("cache").join(cache_hash);
+    if !cache_path.exists() {
+        return Err(DtrError::InvalidState(
+            "cache file not found on disk".to_string(),
+        ));
+    }
+
+    let libs = library_imports(dir)?;
+    let png_tmp = dtr_path(dir).join("preview_tmp.png");
+    let script = build_preview_r_script(&libs, &cache_path, &png_tmp);
+
+    let output = execute_r_script(&script)?;
+
+    // If R produced a PNG, read it and return the bytes
+    if output.trim() == "__DTR_PNG__" && png_tmp.exists() {
+        let bytes = fs::read(&png_tmp)?;
+        let _ = fs::remove_file(&png_tmp);
+        return Ok(PreviewOutput::Png(bytes));
+    }
+
+    Ok(PreviewOutput::Text(output))
+}
+
+/// Build an R script that loads a cached RDS object and produces an
+/// appropriate preview depending on the object type.
+///
+/// For ggplot objects, saves a PNG to `png_path` and prints `__DTR_PNG__`
+/// to stdout as a signal. For everything else, prints text to stdout.
+fn build_preview_r_script(library_imports: &str, cache_path: &Path, png_path: &Path) -> String {
+    let cache_path_escaped = cache_path.display().to_string().replace('\\', "\\\\").replace('\'', "\\'");
+    let png_path_escaped = png_path.display().to_string().replace('\\', "\\\\").replace('\'', "\\'");
+    format!(
+        r#"{library_imports}obj <- readRDS('{cache_path_escaped}')
+if (inherits(obj, 'ggplot')) {{
+  suppressMessages(ggplot2::ggsave('{png_path_escaped}', plot = obj, width = 8, height = 6, dpi = 100))
+  cat('__DTR_PNG__\n')
+}} else if (inherits(obj, 'data.frame')) {{
+  print(head(obj, 20))
+}} else if (inherits(obj, 'lm') || inherits(obj, 'glm')) {{
+  print(summary(obj))
+}} else {{
+  print(obj)
+}}
+"#
+    )
 }
 
 /// Clear cached output of the current node.
@@ -1073,11 +1142,6 @@ mod tests {
         assert!(cwn_path.exists(), "CWN should exist");
         let cwn_content = fs::read_to_string(cwn_path).expect("CWN should be readable");
         assert_eq!(cwn_content, "", "CWN should be empty on init");
-
-        let cwnout_path = dtr.join("cwnout");
-        assert!(cwnout_path.exists(), "cwnout should exist");
-        let cwnout_content = fs::read_to_string(cwnout_path).expect("cwnout should be readable");
-        assert_eq!(cwnout_content, "", "cwnout should be empty on init");
 
         let next_id_path = dtr.join("next_id");
         assert!(next_id_path.exists(), "next_id should exist");
@@ -2117,6 +2181,105 @@ mod tests {
             Err(DtrError::NodeNotFound(_)) => {}
             _ => panic!("expected NodeNotFound error"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Preview tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_preview_errors_without_cache() {
+        let dir = setup("preview_no_cache");
+
+        // Create a node with no cache
+        let hash = add_input(&dir, "head(mtcars, 2)", None).expect("add input");
+
+        let result = preview(&dir, Some(&hash));
+        assert!(result.is_err(), "preview without cache should error");
+        match result {
+            Err(DtrError::InvalidState(msg)) => {
+                assert!(msg.contains("no cached output"), "should mention cache");
+            }
+            _ => panic!("expected InvalidState error"),
+        }
+    }
+
+    #[test]
+    fn test_preview_errors_without_cwn() {
+        let dir = setup("preview_no_cwn");
+
+        let result = preview(&dir, None);
+        assert!(result.is_err(), "preview with empty CWN should error");
+        match result {
+            Err(DtrError::NoCurrentNode) => {}
+            _ => panic!("expected NoCurrentNode error"),
+        }
+    }
+
+    #[test]
+    fn test_preview_errors_on_nonexistent_target() {
+        let dir = setup("preview_bad_target");
+
+        let result = preview(&dir, Some("nonexistent"));
+        assert!(result.is_err(), "preview with bad target should error");
+        match result {
+            Err(DtrError::NodeNotFound(_)) => {}
+            _ => panic!("expected NodeNotFound error"),
+        }
+    }
+
+    #[test]
+    fn test_preview_by_marker_finds_node() {
+        let dir = setup("preview_by_marker");
+
+        let hash = add_input(&dir, "head(mtcars, 2)", Some("mydata")).expect("add input");
+
+        // Set a fake cache
+        fs::create_dir_all(dtr_path(&dir).join("cache")).expect("mkdir");
+        fs::write(dtr_path(&dir).join("cache").join("abc"), "fake rds").expect("write");
+        node_cache_set(&dir, &hash, "abc").expect("set cache");
+
+        // Preview by marker name — should resolve and try to run R (will fail
+        // since RDS isn't real, but the resolution and cache check pass)
+        let result = preview(&dir, Some("mydata"));
+        // This will likely fail at R execution since the RDS is fake,
+        // but it should NOT fail with NodeNotFound or NoCurrentNode
+        assert!(
+            !matches!(&result, Err(DtrError::NodeNotFound(_))),
+            "marker should resolve"
+        );
+        assert!(
+            !matches!(&result, Err(DtrError::NoCurrentNode)),
+            "should not need CWN"
+        );
+    }
+
+    #[test]
+    fn test_build_preview_r_script_text_object() {
+        let libs = "library(dplyr)\n\n";
+        let cache_path = std::path::Path::new("/tmp/cache_abc123");
+        let png_path = std::path::Path::new("/tmp/preview.png");
+        let script = build_preview_r_script(libs, cache_path, png_path);
+
+        assert!(script.contains("library(dplyr)"), "should include library imports");
+        assert!(script.contains("readRDS('/tmp/cache_abc123')"), "should read RDS");
+        assert!(script.contains("inherits(obj, 'ggplot')"), "should check for ggplot");
+        assert!(script.contains("inherits(obj, 'data.frame')"), "should check for data.frame");
+        assert!(script.contains("inherits(obj, 'lm')"), "should check for lm");
+        assert!(script.contains("inherits(obj, 'glm')"), "should check for glm");
+        assert!(script.contains("__DTR_PNG__"), "should emit PNG marker");
+    }
+
+    #[test]
+    fn test_build_preview_r_script_includes_ggsave() {
+        let libs = "";
+        let cache_path = std::path::Path::new("/tmp/cache_xxx");
+        let png_path = std::path::Path::new("/tmp/out.png");
+        let script = build_preview_r_script(libs, cache_path, png_path);
+
+        assert!(script.contains("ggsave('/tmp/out.png'"), "should save to png path");
+        assert!(script.contains("print(head(obj, 20))"), "should preview data frames");
+        assert!(script.contains("print(summary(obj))"), "should summarize models");
     }
 
     // -----------------------------------------------------------------------

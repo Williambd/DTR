@@ -37,7 +37,6 @@ NODE TYPES:\n  \
   dtr add-marker final_chart\n\
 \nBACKEND (.dtr/):\n  \
   CWN       Current working node (like git HEAD)\n  \
-  cwnout    Output of the last dtr run\n  \
   next_id   Incrementing counter for node IDs\n  \
   markers   Named references to nodes\n  \
   packages  R library dependencies (JSON array)\n  \
@@ -56,7 +55,7 @@ enum Command {
     /// Initialize a DTR project in the current directory.
     ///
     /// Creates the .dtr/ backend directory with all required files
-    /// and subdirectories: CWN, cwnout, markers, packages, next_id,
+    /// and subdirectories: CWN, markers, packages, next_id,
     /// blobs/, nodes/, and cache/.
     Init,
 
@@ -133,7 +132,7 @@ enum Command {
     ///
     /// Without -r, skips recomputation of cached ancestors (uses their
     /// stored RDS output via readRDS()). With -r, forces full
-    /// recomputation from scratch. Output is also written to .dtr/cwnout.
+    /// recomputation from scratch. Caches the result as RDS.
     Run {
         /// Force full recomputation, ignore all caches
         #[arg(short = 'r')]
@@ -146,6 +145,17 @@ enum Command {
     /// stores it in .dtr/cache/, and updates the node's cache field.
     /// The next dtr run (without -r) will use this cache.
     Cache,
+
+    /// Preview the cached output of a node.
+    ///
+    /// Loads the cached RDS object and auto-detects how to display it.
+    /// Tibbles/data.frames show a text preview. ggplot objects render as
+    /// PNG images. Models show a summary. Other objects use print().
+    /// Defaults to the current node unless a node ID or marker is given.
+    Preview {
+        /// Node ID or marker name (defaults to current node)
+        target: Option<String>,
+    },
 
     /// Print a JSON description of the DAG.
     ///
@@ -309,6 +319,16 @@ fn exec(dir: &std::path::Path) -> Result<(), dtr::DtrError> {
         Command::Cache => {
             let cache_hash = dtr::cache(dir)?;
             println!("cached output as {cache_hash}");
+            Ok(())
+        }
+        Command::Preview { target } => {
+            use std::io::Write;
+            match dtr::preview(dir, target.as_deref())? {
+                dtr::PreviewOutput::Text(t) => print!("{t}"),
+                dtr::PreviewOutput::Png(bytes) => {
+                    std::io::stdout().write_all(&bytes)?;
+                }
+            }
             Ok(())
         }
         Command::Map {
