@@ -146,6 +146,42 @@ enum Command {
     /// stores it in .dtr/cache/, and updates the node's cache field.
     /// The next dtr run (without -r) will use this cache.
     Cache,
+
+    /// Print a JSON description of the DAG.
+    ///
+    /// By default, returns all nodes with their IDs, types, marker
+    /// names, parents, children, blob hash, and cache hash.
+    /// -c limits to the current node and its descendants.
+    /// -p limits to the current node and its ancestors.
+    Map {
+        /// Recurse children (current node + descendants only)
+        #[arg(short = 'c', long)]
+        recurse_children: bool,
+
+        /// Recurse parents (current node + ancestors only)
+        #[arg(short = 'p', long)]
+        recurse_parents: bool,
+    },
+
+    /// Clear cached output of the current node.
+    ///
+    /// Without flags, clears only the current node's cache.
+    /// -c clears all descendant caches (recurse children).
+    /// -p clears all ancestor caches (recurse parents).
+    /// --all clears the entire cache for all nodes.
+    ClearCache {
+        /// Recurse children (clear all descendant caches)
+        #[arg(short = 'c', long)]
+        recurse_children: bool,
+
+        /// Recurse parents (clear all ancestor caches)
+        #[arg(short = 'p', long)]
+        recurse_parents: bool,
+
+        /// Clear the entire cache for all nodes
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -273,6 +309,27 @@ fn exec(dir: &std::path::Path) -> Result<(), dtr::DtrError> {
         Command::Cache => {
             let cache_hash = dtr::cache(dir)?;
             println!("cached output as {cache_hash}");
+            Ok(())
+        }
+        Command::Map {
+            recurse_children,
+            recurse_parents,
+        } => {
+            let json = dtr::map(dir, recurse_children, recurse_parents)?;
+            println!("{json}");
+            Ok(())
+        }
+        Command::ClearCache {
+            recurse_children,
+            recurse_parents,
+            all,
+        } => {
+            dtr::clear_cache(dir, recurse_children, recurse_parents, all)?;
+            if all {
+                println!("cleared all caches");
+            } else {
+                println!("cleared cache");
+            }
             Ok(())
         }
         Command::Run { force } => {

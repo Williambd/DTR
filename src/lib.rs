@@ -809,6 +809,197 @@ pub fn cache(dir: &Path) -> Result<String, DtrError> {
     Ok(cache_hash)
 }
 
+/// Clear cached output of the current node.
+///
+/// Flags:
+/// - `recurse_children`: clear current node + all descendants
+/// - `recurse_parents`: clear current node + all ancestors
+/// - `all`: ignore CWN; clear all cache files and all node cache fields
+///
+/// When `all` is true, recurse_children/recurse_parents are ignored.
+/// When neither recurse flag is set, only the current node's cache is cleared.
+pub fn clear_cache(
+    dir: &Path,
+    recurse_children: bool,
+    recurse_parents: bool,
+    all: bool,
+) -> Result<(), DtrError> {
+    if all {
+        return clear_all_caches(dir);
+    }
+
+    let hash = cwn_read(dir)?;
+
+    // Verify node exists
+    node_read(dir, &hash)?;
+
+    // Clear current node's cache
+    clear_node_cache(dir, &hash)?;
+
+    if recurse_children {
+        clear_descendant_caches(dir, &hash)?;
+    }
+
+    if recurse_parents {
+        clear_ancestor_caches_recursive(dir, &hash)?;
+    }
+
+    Ok(())
+}
+
+/// Clear the cache field of a single node (keeps cache file on disk).
+fn clear_node_cache(dir: &Path, hash: &str) -> Result<(), DtrError> {
+    let mut node = node_read(dir, hash)?;
+    if node.cache.is_some() {
+        node.cache = None;
+        node_write(dir, hash, &node)?;
+    }
+    Ok(())
+}
+
+/// Clear all caches: remove all files in cache/ and clear cache fields
+/// on every node in nodes/.
+fn clear_all_caches(dir: &Path) -> Result<(), DtrError> {
+    // Clear all node cache fields
+    let nodes_dir = dtr_path(dir).join("nodes");
+    if nodes_dir.exists() {
+        for entry in fs::read_dir(&nodes_dir)? {
+            let entry = entry?;
+            let hash = entry.file_name().to_string_lossy().to_string();
+            clear_node_cache(dir, &hash)?;
+        }
+    }
+
+    // Remove all files from cache/ directory (keep the directory itself)
+    let cache_dir = dtr_path(dir).join("cache");
+    if cache_dir.exists() {
+        for entry in fs::read_dir(&cache_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Clear caches recursively up through parents (ancestors).
+fn clear_ancestor_caches_recursive(dir: &Path, hash: &str) -> Result<(), DtrError> {
+    let node = node_read(dir, hash)?;
+    for parent in &node.parents {
+        clear_node_cache(dir, parent)?;
+        clear_ancestor_caches_recursive(dir, parent)?;
+    }
+    Ok(())
+}
+
+/// Serialize part or all of the DAG as JSON.
+///
+/// By default, returns all nodes with their IDs, types, marker names,
+/// parents, children, blob hash, and cache hash.
+///
+/// - `recurse_children`: only current node + descendants
+/// - `recurse_parents`: only current node + ancestors
+/// - neither: all nodes in the project
+pub fn map(dir: &Path, recurse_children: bool, recurse_parents: bool) -> Result<String, DtrError> {
+    let markers = markers_read(dir).ok();
+    let reverse_markers = build_reverse_marker_map(markers.as_ref());
+
+    let selected_ids: std::collections::BTreeSet<String> = if recurse_children || recurse_parents {
+        let cwn = cwn_read(dir)?;
+        // Verify CWN exists
+        node_read(dir, &cwn)?;
+        let mut ids = std::collections::BTreeSet::new();
+        ids.insert(cwn.clone());
+        if recurse_children {
+            collect_descendant_ids(dir, &cwn, &mut ids)?;
+        }
+        if recurse_parents {
+            collect_ancestor_ids(dir, &cwn, &mut ids)?;
+        }
+        ids
+    } else {
+        // All nodes
+        let nodes_dir = dtr_path(dir).join("nodes");
+        let mut ids = std::collections::BTreeSet::new();
+        if nodes_dir.exists() {
+            for entry in fs::read_dir(&nodes_dir)? {
+                let entry = entry?;
+                ids.insert(entry.file_name().to_string_lossy().to_string());
+            }
+        }
+        ids
+    };
+
+    // Build the JSON object
+    let nodes_map: serde_json::Map<String, serde_json::Value> = selected_ids
+        .iter()
+        .filter_map(|id| {
+            let node = node_read(dir, id).ok()?;
+            let marker = reverse_markers.get(id).cloned();
+            let entry = serde_json::json!({
+                "node_type": node.node_type,
+                "parents": node.parents,
+                "children": node.children,
+                "blob": node.blob,
+                "cache": node.cache,
+                "marker": marker,
+            });
+            Some((id.clone(), entry))
+        })
+        .collect();
+
+    let output = serde_json::json!({"nodes": nodes_map});
+    Ok(serde_json::to_string_pretty(&output)?)
+}
+
+/// Build a reverse lookup: node ID → marker name.
+fn build_reverse_marker_map(
+    markers: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    if let Some(m) = markers {
+        for (name, val) in m {
+            if let Some(hash) = val.as_str() {
+                map.insert(hash.to_string(), name.clone());
+            }
+        }
+    }
+    map
+}
+
+/// Collect all descendant node IDs (children, grandchildren, etc.) into `ids`.
+fn collect_descendant_ids(
+    dir: &Path,
+    hash: &str,
+    ids: &mut std::collections::BTreeSet<String>,
+) -> Result<(), DtrError> {
+    let node = node_read(dir, hash)?;
+    for child in &node.children {
+        if ids.insert(child.clone()) {
+            collect_descendant_ids(dir, child, ids)?;
+        }
+    }
+    Ok(())
+}
+
+/// Collect all ancestor node IDs (parents, grandparents, etc.) into `ids`.
+fn collect_ancestor_ids(
+    dir: &Path,
+    hash: &str,
+    ids: &mut std::collections::BTreeSet<String>,
+) -> Result<(), DtrError> {
+    let node = node_read(dir, hash)?;
+    for parent in &node.parents {
+        if ids.insert(parent.clone()) {
+            collect_ancestor_ids(dir, parent, ids)?;
+        }
+    }
+    Ok(())
+}
+
 /// Give the current working node a marker (nickname).
 /// Returns the node hash the marker points to.
 pub fn add_marker(dir: &Path, name: &str) -> Result<String, DtrError> {
@@ -2650,6 +2841,404 @@ mod tests {
         assert!(blob_path.exists(), "blob should exist at content hash path");
         let content = fs::read_to_string(blob_path).expect("read blob file");
         assert_eq!(content, code);
+    }
+
+    // -----------------------------------------------------------------------
+    // Clear-cache tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_clear_cache_clears_current_node() {
+        let dir = setup("clear_cache_current");
+
+        let hash = add_input(&dir, "read_csv('data.csv')", None).expect("add input");
+
+        // Set a cache on the current node
+        fs::create_dir_all(dtr_path(&dir).join("cache")).expect("mkdir");
+        fs::write(dtr_path(&dir).join("cache").join("aaa"), "rds").expect("write");
+        node_cache_set(&dir, &hash, "aaa").expect("set cache");
+
+        // Clear cache
+        clear_cache(&dir, false, false, false).expect("clear cache");
+
+        // Node cache should be None
+        let node = read_node(&dir, &hash).expect("read node");
+        assert!(node.cache.is_none(), "cache should be cleared");
+
+        // Cache file should still exist (only field cleared, not file -- the
+        // file is content-addressed and might be shared)
+        assert!(dtr_path(&dir).join("cache").join("aaa").exists(), "cache file remains");
+    }
+
+    #[test]
+    fn test_clear_cache_noop_if_no_cache() {
+        let dir = setup("clear_cache_noop");
+
+        let hash = add_input(&dir, "read_csv('data.csv')", None).expect("add input");
+
+        // No cache set — should succeed without error
+        clear_cache(&dir, false, false, false).expect("clear cache with no cache");
+
+        let node = read_node(&dir, &hash).expect("read node");
+        assert!(node.cache.is_none(), "cache should still be none");
+    }
+
+    #[test]
+    fn test_clear_cache_errors_without_cwn() {
+        let dir = setup("clear_cache_no_cwn");
+
+        let result = clear_cache(&dir, false, false, false);
+        assert!(result.is_err(), "clear-cache with empty CWN should error");
+        match result {
+            Err(DtrError::NoCurrentNode) => {}
+            _ => panic!("expected NoCurrentNode error"),
+        }
+    }
+
+    #[test]
+    fn test_clear_cache_errors_on_nonexistent_node() {
+        let dir = setup("clear_cache_bad_node");
+
+        cwn_write(&dir, "deadbeef").expect("write bad cwn");
+        let result = clear_cache(&dir, false, false, false);
+        assert!(result.is_err(), "clear-cache with bad CWN should error");
+        match result {
+            Err(DtrError::NodeNotFound(_)) => {}
+            _ => panic!("expected NodeNotFound error"),
+        }
+    }
+
+    #[test]
+    fn test_clear_cache_recurse_children() {
+        let dir = setup("clear_cache_children");
+
+        let input = add_input(&dir, "read_csv('data.csv')", None).expect("input");
+        let process = add(&dir, "process", "filter(x > 0)").expect("process");
+        let chart = add(&dir, "chart", "ggplot()").expect("chart");
+
+        // Cache process and chart
+        fs::create_dir_all(dtr_path(&dir).join("cache")).expect("mkdir");
+        fs::write(dtr_path(&dir).join("cache").join("bbb"), "rds").expect("write");
+        fs::write(dtr_path(&dir).join("cache").join("ccc"), "rds").expect("write");
+        node_cache_set(&dir, &process, "bbb").expect("cache process");
+        node_cache_set(&dir, &chart, "ccc").expect("cache chart");
+
+        // Clear from process with -rc
+        cwn_write(&dir, &process).expect("goto process");
+        clear_cache(&dir, true, false, false).expect("clear cache -rc");
+
+        // Process and chart caches should be cleared
+        assert!(read_node(&dir, &process).unwrap().cache.is_none(), "process cache cleared");
+        assert!(read_node(&dir, &chart).unwrap().cache.is_none(), "chart cache cleared");
+
+        // Input was never cached, unaffected
+        assert!(read_node(&dir, &input).unwrap().cache.is_none(), "input unchanged");
+    }
+
+    #[test]
+    fn test_clear_cache_recurse_parents() {
+        let dir = setup("clear_cache_parents");
+
+        let input = add_input(&dir, "read_csv('data.csv')", None).expect("input");
+        let process = add(&dir, "process", "filter(x > 0)").expect("process");
+        let chart = add(&dir, "chart", "ggplot()").expect("chart");
+
+        // Cache input and process
+        fs::create_dir_all(dtr_path(&dir).join("cache")).expect("mkdir");
+        fs::write(dtr_path(&dir).join("cache").join("aaa"), "rds").expect("write");
+        fs::write(dtr_path(&dir).join("cache").join("bbb"), "rds").expect("write");
+        node_cache_set(&dir, &input, "aaa").expect("cache input");
+        node_cache_set(&dir, &process, "bbb").expect("cache process");
+
+        // Clear from chart with -rp
+        clear_cache(&dir, false, true, false).expect("clear cache -rp");
+
+        // All three should be cleared
+        assert!(read_node(&dir, &input).unwrap().cache.is_none(), "input cache cleared");
+        assert!(read_node(&dir, &process).unwrap().cache.is_none(), "process cache cleared");
+        assert!(read_node(&dir, &chart).unwrap().cache.is_none(), "chart cache cleared");
+    }
+
+    #[test]
+    fn test_clear_cache_all_clears_everything() {
+        let dir = setup("clear_cache_all");
+
+        let a = add_input(&dir, "read_csv('a.csv')", None).expect("a");
+        let b = add_input(&dir, "read_csv('b.csv')", None).expect("b");
+        add_merge(&dir, "inner_join(input_2, by='id')", &[&a, &b]).expect("merge");
+
+        // Cache all three
+        fs::create_dir_all(dtr_path(&dir).join("cache")).expect("mkdir");
+        fs::write(dtr_path(&dir).join("cache").join("x1"), "r1").expect("write");
+        fs::write(dtr_path(&dir).join("cache").join("x2"), "r2").expect("write");
+        fs::write(dtr_path(&dir).join("cache").join("x3"), "r3").expect("write");
+        node_cache_set(&dir, &a, "x1").expect("cache a");
+        node_cache_set(&dir, &b, "x2").expect("cache b");
+        node_cache_set(&dir, &read_cwn(&dir).unwrap(), "x3").expect("cache merge");
+
+        // Clear all
+        clear_cache(&dir, false, false, true).expect("clear cache --all");
+
+        // All node cache fields should be None
+        let nodes_dir = dtr_path(&dir).join("nodes");
+        for entry in fs::read_dir(nodes_dir).expect("read nodes dir") {
+            let entry = entry.expect("entry");
+            let content = fs::read_to_string(entry.path()).expect("read node");
+            let node: Node = serde_json::from_str(&content).expect("parse node");
+            assert!(node.cache.is_none(), "all node caches should be cleared");
+        }
+
+        // All cache files should be removed
+        let cache_dir = dtr_path(&dir).join("cache");
+        let cache_entries: Vec<_> = fs::read_dir(&cache_dir)
+            .expect("read cache dir")
+            .collect();
+        assert!(cache_entries.is_empty(), "cache directory should be empty");
+    }
+
+    #[test]
+    fn test_clear_cache_all_on_empty_project() {
+        let dir = setup("clear_cache_all_empty");
+
+        // No nodes at all — --all should succeed (no-op)
+        clear_cache(&dir, false, false, true).expect("clear cache --all on empty project");
+
+        let cache_dir = dtr_path(&dir).join("cache");
+        assert!(cache_dir.exists(), "cache dir still exists");
+        let entries: Vec<_> = fs::read_dir(&cache_dir).expect("read cache").collect();
+        assert!(entries.is_empty(), "cache dir should be empty");
+    }
+
+    #[test]
+    fn test_clear_cache_rc_and_rp_clears_both_directions() {
+        let dir = setup("clear_cache_both");
+
+        let input = add_input(&dir, "read_csv('data.csv')", None).expect("input");
+        let process = add(&dir, "process", "filter(x > 0)").expect("process");
+        let chart = add(&dir, "chart", "ggplot()").expect("chart");
+
+        // Cache all three
+        fs::create_dir_all(dtr_path(&dir).join("cache")).expect("mkdir");
+        fs::write(dtr_path(&dir).join("cache").join("a"), "r").expect("write");
+        fs::write(dtr_path(&dir).join("cache").join("b"), "r").expect("write");
+        fs::write(dtr_path(&dir).join("cache").join("c"), "r").expect("write");
+        node_cache_set(&dir, &input, "a").expect("cache input");
+        node_cache_set(&dir, &process, "b").expect("cache process");
+        node_cache_set(&dir, &chart, "c").expect("cache chart");
+
+        // Clear from process with both -rc and -rp
+        cwn_write(&dir, &process).expect("goto process");
+        clear_cache(&dir, true, true, false).expect("clear cache -rc -rp");
+
+        // All three should be cleared
+        assert!(read_node(&dir, &input).unwrap().cache.is_none(), "input cleared");
+        assert!(read_node(&dir, &process).unwrap().cache.is_none(), "process cleared");
+        assert!(read_node(&dir, &chart).unwrap().cache.is_none(), "chart cleared");
+    }
+
+    #[test]
+    fn test_clear_cache_root_node_no_parent() {
+        let dir = setup("clear_cache_root");
+
+        let input = add_input(&dir, "read_csv('data.csv')", None).expect("input");
+
+        fs::create_dir_all(dtr_path(&dir).join("cache")).expect("mkdir");
+        fs::write(dtr_path(&dir).join("cache").join("r"), "rds").expect("write");
+        node_cache_set(&dir, &input, "r").expect("cache");
+
+        // Clear with -rp on root node (no parents) — should succeed
+        clear_cache(&dir, false, true, false).expect("clear cache -rp on root");
+
+        assert!(read_node(&dir, &input).unwrap().cache.is_none(), "root cache cleared");
+    }
+
+    // -----------------------------------------------------------------------
+    // Map tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_map_all_nodes() {
+        let dir = setup("map_all");
+
+        let a = add_input(&dir, "read_csv('a.csv')", Some("alpha")).expect("a");
+        let b = add_input(&dir, "read_csv('b.csv')", Some("beta")).expect("b");
+        let _process = add(&dir, "process", "filter(x > 0)").expect("process");
+
+        let json = map(&dir, false, false).expect("map all");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+
+        let nodes = parsed["nodes"].as_object().expect("nodes object");
+        assert_eq!(nodes.len(), 3, "should have 3 nodes");
+        assert!(nodes.contains_key(&a), "should contain node a");
+        assert!(nodes.contains_key(&b), "should contain node b");
+
+        // Check marker names
+        assert_eq!(nodes[&a]["marker"], "alpha");
+        assert_eq!(nodes[&b]["marker"], "beta");
+
+        // Check node types
+        assert_eq!(nodes[&a]["node_type"], "input");
+
+        // Check parent/child relationships
+        let process_id = read_cwn(&dir).unwrap();
+        let process_node = &nodes[&process_id];
+        assert_eq!(process_node["parents"].as_array().unwrap().len(), 1);
+        assert!(process_node["children"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_map_empty_project() {
+        let dir = setup("map_empty");
+
+        let json = map(&dir, false, false).expect("map empty");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+
+        let nodes = parsed["nodes"].as_object().expect("nodes object");
+        assert!(nodes.is_empty(), "should have no nodes");
+    }
+
+    #[test]
+    fn test_map_recurse_children() {
+        let dir = setup("map_rc");
+
+        let input = add_input(&dir, "read_csv('data.csv')", None).expect("input");
+        let process = add(&dir, "process", "filter(x > 0)").expect("process");
+        let chart = add(&dir, "chart", "ggplot()").expect("chart");
+
+        // Branch from input to create a sibling subtree
+        cwn_write(&dir, &input).expect("goto input");
+        let model = add(&dir, "model", "glm(y ~ x)").expect("model");
+
+        // Put CWN at process. -rc should give process + chart (descendants
+        // of process), but NOT input (ancestor) or model (sibling branch).
+        cwn_write(&dir, &process).expect("goto process");
+
+        let json = map(&dir, true, false).expect("map -rc");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let nodes = parsed["nodes"].as_object().expect("nodes object");
+
+        assert!(nodes.contains_key(&process), "should contain process");
+        assert!(nodes.contains_key(&chart), "should contain chart");
+        assert!(!nodes.contains_key(&input), "should NOT contain input (ancestor)");
+        assert!(!nodes.contains_key(&model), "should NOT contain model (sibling branch)");
+    }
+
+    #[test]
+    fn test_map_recurse_parents() {
+        let dir = setup("map_rp");
+
+        let input = add_input(&dir, "read_csv('data.csv')", None).expect("input");
+        let process = add(&dir, "process", "filter(x > 0)").expect("process");
+        let chart = add(&dir, "chart", "ggplot()").expect("chart");
+
+        // Branch from process
+        cwn_write(&dir, &process).expect("goto process");
+        let model = add(&dir, "model", "glm(y ~ x)").expect("model");
+
+        // CWN is at model. Map -rp should give model, process, input
+        // but NOT chart.
+        let json = map(&dir, false, true).expect("map -rp");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let nodes = parsed["nodes"].as_object().expect("nodes object");
+
+        assert!(nodes.contains_key(&input), "should contain input");
+        assert!(nodes.contains_key(&process), "should contain process");
+        assert!(nodes.contains_key(&model), "should contain model");
+        assert!(!nodes.contains_key(&chart), "should NOT contain chart (sibling)");
+    }
+
+    #[test]
+    fn test_map_errors_without_cwn_for_rc() {
+        let dir = setup("map_rc_no_cwn");
+
+        let result = map(&dir, true, false);
+        assert!(result.is_err(), "map -rc with empty CWN should error");
+        match result {
+            Err(DtrError::NoCurrentNode) => {}
+            _ => panic!("expected NoCurrentNode error"),
+        }
+    }
+
+    #[test]
+    fn test_map_errors_without_cwn_for_rp() {
+        let dir = setup("map_rp_no_cwn");
+
+        let result = map(&dir, false, true);
+        assert!(result.is_err(), "map -rp with empty CWN should error");
+        match result {
+            Err(DtrError::NoCurrentNode) => {}
+            _ => panic!("expected NoCurrentNode error"),
+        }
+    }
+
+    #[test]
+    fn test_map_errors_on_nonexistent_node() {
+        let dir = setup("map_bad_node");
+
+        cwn_write(&dir, "deadbeef").expect("write bad cwn");
+        let result = map(&dir, true, false);
+        assert!(result.is_err(), "map with bad CWN should error");
+        match result {
+            Err(DtrError::NodeNotFound(_)) => {}
+            _ => panic!("expected NodeNotFound error"),
+        }
+    }
+
+    #[test]
+    fn test_map_merge_node_includes_multiple_parents() {
+        let dir = setup("map_merge");
+
+        let left = add_input(&dir, "read_csv('left.csv')", Some("left")).expect("left");
+        let right = add_input(&dir, "read_csv('right.csv')", Some("right")).expect("right");
+        add_merge(&dir, "inner_join(right, by='id')", &[&left, &right]).expect("merge");
+        let merge_hash = read_cwn(&dir).unwrap();
+
+        let json = map(&dir, false, false).expect("map all");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let nodes = parsed["nodes"].as_object().expect("nodes object");
+
+        let merge_node = &nodes[&merge_hash];
+        let parents = merge_node["parents"].as_array().unwrap();
+        assert_eq!(parents.len(), 2);
+        assert!(parents.contains(&serde_json::Value::String(left.clone())));
+        assert!(parents.contains(&serde_json::Value::String(right.clone())));
+    }
+
+    #[test]
+    fn test_map_includes_blob_and_cache() {
+        let dir = setup("map_fields");
+
+        let code = "read_csv('data.csv')";
+        let hash = add_input(&dir, code, None).expect("add input");
+
+        // Set a cache
+        fs::create_dir_all(dtr_path(&dir).join("cache")).expect("mkdir");
+        fs::write(dtr_path(&dir).join("cache").join("xxx"), "rds").expect("write");
+        node_cache_set(&dir, &hash, "xxx").expect("set cache");
+
+        let json = map(&dir, false, false).expect("map");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let node = &parsed["nodes"][&hash];
+
+        assert_eq!(node["blob"], hash_string(code), "should include blob hash");
+        assert_eq!(node["cache"], "xxx", "should include cache hash");
+    }
+
+    #[test]
+    fn test_map_all_includes_nodes_from_disconnected_branches() {
+        let dir = setup("map_all_disconnected");
+
+        // Create two independent input nodes (no shared ancestry)
+        let a = add_input(&dir, "read_csv('a.csv')", Some("first")).expect("a");
+        let b = add_input(&dir, "read_csv('b.csv')", Some("second")).expect("b");
+
+        // Default map should include both
+        let json = map(&dir, false, false).expect("map all");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let nodes = parsed["nodes"].as_object().expect("nodes object");
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes.contains_key(&a));
+        assert!(nodes.contains_key(&b));
     }
 
     #[test]

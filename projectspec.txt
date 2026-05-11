@@ -59,6 +59,17 @@ dtr cache: command caches the run output of the current node.
 
 dtr add-marker <name>: gives the current node an easy to remember nickname.
 
+dtr map: returns a json describing the graph. By default it
+returns a json containing all nodes, their names and marker names, their
+parents and children. If flags -rc is specified, the JSON return contains all
+descendents of the current node (recurse children), if -rp is specified the return contains all
+ancestors (recurse parents).
+
+dtr clear-cache (-rc,-rp,--all): Clears cached output of current node. Optional flags include
+-rc (recurse children) which clears the cached output for all descendents, -rp
+(recurse parents)  which clears cached output for all ancestors, and
+--all which clears entire cache.
+
 ## Nodes
 There are five different types of nodes in DTR, which differ in their expected
 outputs.
