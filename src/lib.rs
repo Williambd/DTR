@@ -706,16 +706,16 @@ pub fn run(dir: &Path, force: bool) -> Result<String, DtrError> {
     let hash = cwn_read(dir)?;
 
     // Build the R script
+    let libs = library_imports(dir)?;
     let composed = if force {
         compose_node(dir, &hash)?
     } else {
         compose_node_cached(dir, &hash)?
     };
-    let composed = format!("{}{}", library_imports(dir)?, composed);
 
-    // Wrap with result capture and RDS save
+    // Wrap with result capture and RDS save (libs go before result <-)
     let tmp_rds = dtr_path(dir).join("cache").join(".tmp_result.rds");
-    let script = wrap_r_script(&composed, &tmp_rds);
+    let script = wrap_r_script(&libs, &composed, &tmp_rds);
 
     // Execute via Rscript
     let output = execute_r_script(&script)?;
@@ -740,10 +740,13 @@ pub fn run(dir: &Path, force: bool) -> Result<String, DtrError> {
 
 /// Wrap a composed R pipe chain so that it captures the result
 /// via `print()` and saves it as RDS for future caching.
-fn wrap_r_script(composed: &str, rds_path: &Path) -> String {
+///
+/// `library_imports` (e.g. "library(dplyr)\nlibrary(ggplot2)\n\n")
+/// are placed BEFORE the `result <-` assignment so that the pipe
+/// chain — not a `library()` call — is captured as the result.
+fn wrap_r_script(library_imports: &str, composed_chain: &str, rds_path: &Path) -> String {
     format!(
-        "result <- {}\nprint(result)\nsaveRDS(result, '{}')\n",
-        composed,
+        "{library_imports}result <- {composed_chain}\nprint(result)\nsaveRDS(result, '{}')\n",
         rds_path.display()
     )
 }
@@ -783,10 +786,10 @@ fn execute_r_script(script: &str) -> Result<String, DtrError> {
 pub fn cache(dir: &Path) -> Result<String, DtrError> {
     let hash = cwn_read(dir)?;
 
+    let libs = library_imports(dir)?;
     let composed = compose_node(dir, &hash)?;
-    let composed = format!("{}{}", library_imports(dir)?, composed);
     let tmp_rds = dtr_path(dir).join("cache").join(".tmp_result.rds");
-    let script = wrap_r_script(&composed, &tmp_rds);
+    let script = wrap_r_script(&libs, &composed, &tmp_rds);
 
     // Run R to produce the RDS file
     let _output = execute_r_script(&script)?;
@@ -2208,7 +2211,7 @@ mod tests {
     fn test_wrap_r_script_builds_correctly() {
         let composed = "read_csv('data.csv') |>\n  filter(x > 0)";
         let rds_path = std::path::Path::new("/tmp/test.rds");
-        let script = wrap_r_script(composed, rds_path);
+        let script = wrap_r_script("", composed, rds_path);
 
         assert!(script.starts_with("result <-"), "should assign to result");
         assert!(script.contains("read_csv"), "should contain composed code");
@@ -2216,6 +2219,30 @@ mod tests {
         assert!(
             script.contains("saveRDS(result, '/tmp/test.rds')"),
             "should save RDS: got\n{script}"
+        );
+    }
+
+    #[test]
+    fn test_wrap_r_script_with_libraries() {
+        let libs = "library(dplyr)\nlibrary(ggplot2)\n\n";
+        let composed = "read_csv('data.csv') |>\n  ggplot(aes(x, y)) + geom_point()";
+        let rds_path = std::path::Path::new("/tmp/test.rds");
+        let script = wrap_r_script(libs, composed, rds_path);
+
+        // Library calls must come BEFORE result <-
+        let result_pos = script.find("result <-").unwrap();
+        let lib_pos = script.find("library(dplyr)").unwrap();
+        assert!(lib_pos < result_pos, "library() must precede result <-");
+
+        // result should capture the pipe chain, not a library call
+        assert!(
+            script.contains("result <- read_csv"),
+            "result should capture pipe chain: got\n{script}"
+        );
+        assert!(script.contains("print(result)"), "should print result");
+        assert!(
+            script.contains("saveRDS(result, '/tmp/test.rds')"),
+            "should save RDS"
         );
     }
 
