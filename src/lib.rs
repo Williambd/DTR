@@ -744,9 +744,13 @@ pub fn run(dir: &Path, force: bool) -> Result<String, DtrError> {
 /// `library_imports` (e.g. "library(dplyr)\nlibrary(ggplot2)\n\n")
 /// are placed BEFORE the `result <-` assignment so that the pipe
 /// chain — not a `library()` call — is captured as the result.
+///
+/// The composed chain is wrapped in braces `{{ ... }}` so that when
+/// merge nodes emit multiple statements (side-parent assignments + main
+/// pipe), the *last* expression's value is captured as `result`.
 fn wrap_r_script(library_imports: &str, composed_chain: &str, rds_path: &Path) -> String {
     format!(
-        "{library_imports}result <- {composed_chain}\nprint(result)\nsaveRDS(result, '{}')\n",
+        "{library_imports}result <- {{\n{composed_chain}\n}}\nprint(result)\nsaveRDS(result, '{}')\n",
         rds_path.display()
     )
 }
@@ -2213,7 +2217,8 @@ mod tests {
         let rds_path = std::path::Path::new("/tmp/test.rds");
         let script = wrap_r_script("", composed, rds_path);
 
-        assert!(script.starts_with("result <-"), "should assign to result");
+        // Chain is wrapped in braces so multi-statement merge output works
+        assert!(script.starts_with("result <- {"), "should assign to result via braces");
         assert!(script.contains("read_csv"), "should contain composed code");
         assert!(script.contains("print(result)"), "should print result");
         assert!(
@@ -2234,16 +2239,46 @@ mod tests {
         let lib_pos = script.find("library(dplyr)").unwrap();
         assert!(lib_pos < result_pos, "library() must precede result <-");
 
-        // result should capture the pipe chain, not a library call
+        // Chain is wrapped in braces: result <- {\n...\n}
         assert!(
-            script.contains("result <- read_csv"),
-            "result should capture pipe chain: got\n{script}"
+            script.contains("result <- {"),
+            "result should use brace block: got\n{script}"
         );
         assert!(script.contains("print(result)"), "should print result");
         assert!(
             script.contains("saveRDS(result, '/tmp/test.rds')"),
             "should save RDS"
         );
+    }
+
+    #[test]
+    fn test_wrap_r_script_with_merge_multi_statement() {
+        let libs = "library(dplyr)\n\n";
+        // Simulate what compose_node emits for a merge node:
+        // side-parent assignment + main pipe chain
+        let composed = concat!(
+            "b <- read_csv('b.csv')\n",
+            "\n",
+            "read_csv('a.csv') |>\n",
+            "  left_join(b, by = 'id') |>\n",
+            "  mutate(z = x + y)"
+        );
+        let rds_path = std::path::Path::new("/tmp/test.rds");
+        let script = wrap_r_script(libs, composed, rds_path);
+
+        // The entire composed chain must be inside braces
+        assert!(script.contains("result <- {"), "should open brace block");
+        assert!(script.contains("\n}\nprint(result)"), "should close brace before print");
+
+        // Library before result
+        let result_pos = script.find("result <-").unwrap();
+        let lib_pos = script.find("library(dplyr)").unwrap();
+        assert!(lib_pos < result_pos, "library() must precede result <-");
+
+        // Must contain both the assignment and the pipe chain
+        assert!(script.contains("b <- read_csv"), "should contain side assignment");
+        assert!(script.contains("left_join(b, by = 'id')"), "should contain merge");
+        assert!(script.contains("mutate(z = x + y)"), "should contain downstream transform");
     }
 
     #[test]
