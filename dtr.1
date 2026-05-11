@@ -1,0 +1,165 @@
+.TH DTR 1 "May 2026" "dtr 0.1.0" "User Commands"
+.SH NAME
+dtr \- a directed graph R project organizer
+.SH SYNOPSIS
+.B dtr
+[\fI\-h\fR|\fI\-\-help\fR] [\fI\-V\fR|\fI\-\-version\fR] \fI<command>\fR [\fI<args>\fR]
+.SH DESCRIPTION
+DTR atomizes R data analysis pipelines into nodes on a directed acyclic
+graph. Each node contains a single R/tidyverse expression that chains
+via the native \fB|>\fR pipe. This makes large analysis projects organized,
+reproducible, and explorable.
+.PP
+Nodes are stored in a \fB\&.dtr\fR directory with a git-inspired backend.
+Blobs (R code) are content-addressed by SHA1. Nodes use incrementing
+hex IDs (n0, n1, n2, ...). CWN tracks the current working node (like
+git HEAD).
+.SH NODE TYPES
+.TP
+.B input
+Read data from files or databases (dplyr).
+.TP
+.B process
+Transform tibbles: mutate, filter, select, arrange, summarise, etc.
+.TP
+.B chart
+Create visualizations (ggplot2).
+.TP
+.B model
+Fit statistical models: glm, lm, etc.
+.TP
+.B merge
+Join outputs from multiple parents (dplyr joins: inner_join, left_join, etc.).
+.SH COMMANDS
+.TP
+\fBdtr init\fR
+Initialize a DTR project in the current directory.
+Creates the \fB\&.dtr/\fR backend with all required files.
+.TP
+\fBdtr add input\fR \fI<code>\fR [\fB\-m\fR \fI<name>\fR]
+Add an input node (root, no parent). Auto-generates a marker
+(\fIinput_N\fR) unless \fB\-m\fR is given.
+.TP
+\fBdtr add process\fR \fI<code>\fR
+Add a process node (dplyr transform). Takes tibble, returns tibble.
+.TP
+\fBdtr add chart\fR \fI<code>\fR
+Add a chart node (ggplot2). Takes tibble, returns ggplot object.
+.TP
+\fBdtr add model\fR \fI<code>\fR
+Add a model node (glm, lm). Takes tibble, returns model object.
+.TP
+\fBdtr add merge\fR \fI<code>\fR \fI<parent>...\fR
+Add a merge node joining 2+ parents. Parents may be node IDs or
+markers. The first parent pipes via \fB|>\fR; others are assigned to
+variables named after their markers.
+.TP
+\fBdtr add\-marker\fR \fI<name>\fR
+Give the current node a human-readable nickname. Markers can be used
+with \fBgoto\fR, \fBadd merge\fR, and appear as variable names in
+\fBcompose\fR output.
+.TP
+\fBdtr add\-lib\fR \fI<package>\fR
+Register an R package dependency. Packages are imported via
+\fBlibrary()\fR at the top of every composed or executed script.
+Duplicate additions are ignored.
+.TP
+\fBdtr read\fR
+Print the R code of the current node to stdout.
+.TP
+\fBdtr write\fR \fI<code>\fR
+Replace the R code of the current node. Invalidates the node's
+cache and all descendant caches.
+.TP
+\fBdtr goto\fR \fI<target>\fR
+Move to a different working node. Accepts a node ID, marker name,
+\fB\&..\fR (parent), or \fB\&.\fR (child). Shortcuts error on ambiguity.
+.TP
+\fBdtr delete\fR [\fB\-r\fR]
+Delete the current node. Without \fB\-r\fR, refuses if the node has
+children. With \fB\-r\fR, recursively deletes all descendants.
+Cleans up orphaned cache files. Moves CWN to the first parent.
+.TP
+\fBdtr compose\fR
+Produce a runnable R script from the current node and all ancestors.
+Package library() calls are prepended automatically.
+.TP
+\fBdtr run\fR [\fB\-r\fR]
+Execute the current node and print the result. Without \fB\-r\fR,
+skips cached ancestors (uses their stored RDS output via
+\fBreadRDS()\fR). With \fB\-r\fR, forces full recomputation.
+Output is also written to \fB\&.dtr/cwnout\fR.
+.TP
+\fBdtr cache\fR
+Cache the current node's output as RDS. Runs the composed script,
+hashes the result, stores it in \fB\&.dtr/cache/\fR, and updates
+the node's cache field. The next \fBdtr run\fR (without \fB\-r\fR)
+will use this cache.
+.SH BACKEND (.dtr/)
+.TP
+\fBCWN\fR
+Current working node (like git HEAD). Contains the node ID.
+.TP
+\fBcwnout\fR
+Text output of the last \fBdtr run\fR.
+.TP
+\fBnext_id\fR
+Incrementing counter for node IDs.
+.TP
+\fBmarkers\fR
+Named references to nodes (JSON object).
+.TP
+\fBpackages\fR
+R library dependencies (JSON array).
+.TP
+\fBblobs/\fR
+R code, content-addressed by SHA1. Immutable.
+.TP
+\fBnodes/\fR
+Node metadata in JSON format. Mutable in place.
+.TP
+\fBcache/\fR
+Cached RDS outputs, content-addressed by SHA1.
+.SH EXAMPLES
+.PP
+Initialize a project and build a simple pipeline:
+.PP
+.RS 4
+.nf
+dtr init
+dtr add\-lib dplyr
+dtr add\-lib ggplot2
+dtr add input "read_csv('sales.csv')" \-m sales
+dtr add process "filter(amount > 100)"
+dtr add chart "ggplot(aes(date, amount)) + geom_line()"
+dtr compose
+dtr run
+.fi
+.RE
+.PP
+Navigate and edit:
+.PP
+.RS 4
+.nf
+dtr goto ..
+dtr read
+dtr write "filter(amount > 500)"
+dtr goto sales
+dtr delete \-r
+.fi
+.RE
+.PP
+Cache and re-run:
+.PP
+.RS 4
+.nf
+dtr run \-r          # full recomputation
+dtr run              # uses cache where available
+dtr cache            # explicit cache
+.fi
+.RE
+.SH SEE ALSO
+.BR R (1),
+.BR Rscript (1)
+.SH AUTHOR
+DTR contributors.

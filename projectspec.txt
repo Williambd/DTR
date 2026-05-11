@@ -1,0 +1,112 @@
+
+# DTR project specifications
+
+## High Level Goal
+DTR's is a command line tool that makes large and sprawling data analysis
+projects in R easier to organize by atomizing analysis steps into nodes on a directed graph.
+
+This has a few advantages,
+1) Users can explore "forking paths" of data analysis in seperate paths without
+needing to bloat their analysis scripts or create new notebooks.
+
+2) Agentic LLM applications can use DTR to organize user analysis needs, for
+example when users want to try new analysis, rather than rewriting the
+codebase, agents can extend or branch DTR paths, and display the analysis
+results without altering any scripts.
+
+3) All work products maintain isolated replicability. For example given a chart,
+(which is itself a node in a DTR project) DTR can output the exact and
+sufficient code used to create that chart - no more scrolling large R
+files to audit a chart.
+
+4) Enforced tidyverse formatting.
+
+## Commands
+dtr init: initializes a DTR project folder in the current directory. See project
+structure for more details.
+
+dtr goto <node hash or nickname>: allows users to move which node they are
+currently working on. Additionally can move to parent of current working node
+using ".."
+
+dtr add <node type> <R code string>: allows users to add a child node to the
+current working node, then moves to that node as the current working node. R
+code string should be an appropriate R/tidyverse function (such as from dplyr or
+ggplot2 or glm) that expects to be piped the needed context via R's native |>
+pipe.
+	Special cases of dtr add.
+		dtr add merge <R code string> <parent ...> can take multiple parent nodes and give their outputs variable names for use in the R code snippet.
+		dtr add input <R code string> automatically creates a marker with a generic input name, unless the -m <marker name> flag has been specified.
+
+dtr read: reads the R code contained in the current node.
+
+dtr write <R code>: replaces the contents of the current node with the R code
+added.
+
+dtr delete: deletes current node, moves current working node to the parent.
+
+dtr compose: command takes the current working node, and displays all the
+analysis steps (all parents) used to reach this node as a single
+chained-together runnable R script. 
+
+dtr run: command gives the R output of the current node, using the output of the
+parents. There are two flags, -r flag runs the run recursively, essentially
+replicating what would happen if you ran the R code output of dtr compose. The
+default functionality saves time, by using cached node outputs of any
+ancestors to avoid rerunning unneeded code.
+
+dtr cache: command caches the run output of the current node.
+
+dtr add-marker <name>: gives the current node an easy to remember nickname.
+
+## Nodes
+There are five different types of nodes in DTR, which differ in their expected
+outputs.
+
+Input: contains R code that uses dplyr to read in a data source from the main
+or a data directory.
+
+Process: contains R code that uses dplyr to transform a piped tibble, such as
+creating new columns (mutate), filtering rows (filter), or selecting variables
+(select). Takes a tibble as input and produces a tibble as output.
+
+Chart: contains R code that uses ggplot2 to chart a piped tibble.
+
+Model: contains R code that creates a statistical model such as glm for piped tibble.
+
+Merge: a merge node contains R code that uses dplyr to join a tibble output
+from two different parent nodes.
+
+## dtr functionality
+
+The backend structure for dtr is heavily inspired by the git tool.
+ 
+In the backend, all the analysis for a project is contained in a directory
+called .dtr .  In this directory are the following files:
+
+- CWN: file tracks the hash of the current working node. This is how dtr knows
+  which node it is currently working on.
+
+- cwnout: file that contains the outputted R object resulting from running the
+  composed R script of the graph up to the current working node. Created empty
+  during `dtr init` and populated by `dtr run`.
+
+- blobs directory: which contains file names are sha1 hashes, and contain plaintext of the R functions being run.
+
+- nodes directory: contains nodes files. File names are hashes of the
+  contents. file contents are metadata for that node in a json format. They
+  include the time this node was created, the hash of the parents, the hashes
+  of the children nodes, the hash of any output cache. 
+
+- markers: a file in json format, that contains the names of markers, and the
+  node they refer to.
+
+- cache directory: contains files that store the chached outputs of nodes.
+
+## Tools
+dtr is built to be a CLI, and is programmed in rust. It is
+designed for code snippets that run R functions, taking advantage of R's
+functional programming design, and the ease of piping to R functions. 
+It is meant for the current R 4.x versions and especially for use with tools
+like dplyr and ggplot2, and makes use of |> pipes when
+running R.
