@@ -30,7 +30,7 @@ DTR solves this by making each analysis step a standalone node:
 - **Trace any output to its source** — `dtr compose` prints the exact pipeline that produced a result
 - **Branch fearlessly** — fork at any node without duplicating or commenting out code
 - **Cache everything** — intermediate results are saved as RDS, so re-running only recomputes what changed
-- **LLM-friendly** — Tool is designed with agentic use in mind, via the DTR-USE skill.
+- **LLM-friendly** — Tool is designed with agentic use in mind, via the DTR-USE skill (seperate repo).
 
 ## Project Roadmap:
 Basically I wanted to build something that is to R-markdown what R-markdown is to pure R (or jupyter notebook to a python script). Cell-based notebook analysis is a great tool for data analysts: you get to experiment, view intermediate outputs, try stuff out. It's more natural to use, while still keeping a record of what you're doing. You don't need to rerun intensive processes that are unchanged in your code
