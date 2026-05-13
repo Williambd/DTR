@@ -38,13 +38,7 @@ DTR solves this by making each analysis step a standalone node:
 
 ## Quick Start
 
-### Install
-
-```bash
-cargo install --path .
-```
-
-Requires **R ≥ 4.1** and **Rscript** on `PATH`.
+Requires **Rust**, **R ≥ 4.1**, and **Rscript** on `PATH`.
 
 ### A complete example
 
@@ -163,12 +157,17 @@ When you run `dtr run`, ancestors with valid caches are loaded via `readRDS()`
 instead of being recomputed. `dtr write` mutates the node in-place and clears
 downstream caches automatically.
 
-## Building from Source
+## Install
 
 ```bash
 git clone git@github.com:Williambd/DTR.git
 cd DTR
 cargo build --release
+cp target/release/dtr ~/.local/bin/    # or anywhere on PATH
+```
+
+Run the test suite:
+
+```bash
 cargo test        # 128 tests
-cp target/release/dtr ~/.local/bin/
 ```
