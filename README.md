@@ -4,19 +4,15 @@
 analysis projects manageable by breaking them into small, reusable nodes on a
 directed acyclic graph.
 
-```
-read_csv('sales.csv')          read_csv('customers.csv')
-        │                              │
-        ├── filter(amount > 100)       │
-        │        │                     │
-        │   mutate(month = ...)        │
-        │        │                     │
-        └────────┼─── left_join(cust, by = 'id')
-                 │
-          ggplot(...) + geom_col()
-                 │
-             lm(amount ~ month)
-```
+
+ ```
+   n0 [input · cpi] ───────────┐
+                               ├── n2 [merge] ──┬── n3 [process] ─┬── n4 [chart · phillips_curve]        ✓
+   n1 [input · unemployment] ──┘                │                 │
+                                                │                 └── na [process] ── nc [chart · phillips_yearly] ★ ✓
+                                                │
+                                                └── n5 [chart · unemployment_trend]                       ✓
+ ```
 
 Each node is a single tidyverse expression — one `filter`, one `mutate`, one
 `ggplot` call. Nodes chain via R's native `|>` pipe. The backend uses
@@ -25,7 +21,7 @@ cached and reproducible.
 
 ## Why DTR?
 
-R analysis scripts tend to grow into thousand-line monoliths. Auditing a single
+R analysis scripts tend to grow into large monoliths. Auditing a single
 chart means scrolling through layers of transformations. Trying a different
 approach means duplicating the script or commenting out code.
 
@@ -34,11 +30,30 @@ DTR solves this by making each analysis step a standalone node:
 - **Trace any output to its source** — `dtr compose` prints the exact pipeline that produced a result
 - **Branch fearlessly** — fork at any node without duplicating or commenting out code
 - **Cache everything** — intermediate results are saved as RDS, so re-running only recomputes what changed
-- **LLM-friendly** — agents can extend or branch DTR graphs without touching existing nodes
+- **LLM-friendly** — Tool is designed with agentic use in mind, via the DTR-USE skill.
+
+## Project Roadmap --- HUMAN ONLY WRITING:
+Basically I wanted to build something that is to R-markdown what R-markdown is to pure R (or jupyter notebook to a python script). Cell-based notebook analysis is a great tool for data analysts: you get to experiment, view intermediate outputs, try stuff out. It's more natural to use, while still keeping a record of what you're doing. You don't need to rerun intensive processes that are unchanged in your code
+
+But the limitations are real too. Verifying the methodology of one chart can require reading through a large mono notebook of analysis. Often, larger teams break up their analysis & model building into multiple notebooks & pipelines, where intermediate outputs are stored and whose lineage is carefully tracked, to ensure downstream users are properly using. Code gets replicated across notebooks on a single project, so that analysts can branch and try multiple ideas flexibly.
+
+A lot of this basically comes down to problems of functional programming. Analysts are generally writing functional code, but their meta-project (intermediate files, interactions between pipelines and models etc) and tools (like jupyter or RMD) are state-dependent.
+
+DTR is trying to simplify this by conceiving of your analysis as a graph of inputs, processing decisions, visualizations, and models. In dtr, lineage tracing is automatic, you can always see EXACTLY what code creates the current node. Intermediate outputs are cached and automatically cleared by upstream changes, so there's never any need to load them seperately, or to make sure a collaborator has run the script already. You only need to store your primary data. Code is functional and replicatable by default. Auditing is easy, because you can view the code that made the chart/model you are auditing, without the fluff.
+
+Why R and not python? Basically R comes equipped with the functional programming toolkit needed for me to develop dtr with the free time I had. I would be extremely interested in building (or seeing) something that replicates the dtr architecture but for python, but I suspect inconsistencies between libraries would make this a much more involved project.
+
+Pretty much all the actual code has been agentically written in rust, but the architecture has been carefully planned exclusively by a human (me) and is heavily inspired by the basic structure of git. My current workflow in bug catching is to work on personal projects using DTR, and then as bugs come up, deciding what solutions fit the long-term needs of the project. I'm also regularly running "Agent Code Audits" (see audits folder) that focus on catching implementation errors that could come back to haunt the project. 
+
+An important part of DTR is the agent skill. While I think dtr is a great tool in general, I recognize that adding each node via shell isn't the most intuitive for humans. This can probably be fixed via an excellent gui, but that's just not the thing I'm personally most interested in building right now. The dtr-use skill repo is my attempt to build the optimal for doing analysis in dtr (I'm using pi-mono, but trying to keep it broadly compatible). (Side note: the economics of building a skill interface for a new tool are really strange. The cost of learning to use a new tool is basically being transfered from the user to the creator, which is a wierd tradeoff to experience.)
+
+Anyways, give dtr a try! Reach out to me with any issues or features you want! Enjoy!
 
 ## Quick Start
 
 Requires **Rust**, **R ≥ 4.1**, and **Rscript** on `PATH`.
+
+
 
 ### A complete example
 
