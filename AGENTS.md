@@ -31,8 +31,6 @@ markers (like git refs), and CWN (like HEAD).
 | `projectspec.txt` | Canonical specification |
 | `dtr.1` | Manpage (groff) |
 | `audit/` | Code audit reports |
-| `dtr-use/` | Agent skill for using DTR (Agent Skills standard) |
-| `AGENTS.md` | This file — development guide loaded by pi
 
 ## Architecture
 

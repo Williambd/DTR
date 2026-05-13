@@ -174,28 +174,12 @@ downstream caches automatically.
 
 ## Install
 
-### pi users
-
 ```bash
-pi install git:github.com/Williambd/DTR
-```
-
-This builds the binary and registers the `dtr-use` skill automatically.
-
-### Everyone else
-
-```bash
-git clone git@github.com:Williambd/DTR.git ~/DTR
-cd ~/DTR
+git clone git@github.com:Williambd/DTR.git
+cd DTR
 cargo build --release
 cp target/release/dtr ~/.local/bin/    # or anywhere on PATH
-
-# Register the dtr-use skill (Agent Skills standard)
-ln -s ~/DTR/dtr-use ~/.agents/skills/dtr-use
 ```
-
-Works with Claude Code, Codex, Goose, and any agent that supports the
-[Agent Skills](https://agentskills.io) standard.
 
 Run the test suite:
 

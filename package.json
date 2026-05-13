@@ -1,9 +1,0 @@
-{
-  "name": "dtr",
-  "version": "0.1.0",
-  "description": "Directed Graph R Project Organizer — atomize R data analysis into DAG nodes",
-  "keywords": ["pi-package"],
-  "pi": {
-    "skills": ["./dtr-use"]
-  }
-}
