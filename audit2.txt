@@ -1,0 +1,244 @@
+# DTR Code Audit #2 — 2026-05-13
+
+## Scope
+Full review of src/lib.rs (3525 lines), src/main.rs (381 lines), 128 tests.
+Focus: overcomplexity, maintainability, consistency, functional simplicity.
+
+## Summary
+
+The codebase is in good shape. The worst bug (write_current orphaning) was
+resolved in the previous commit. clippy reports only 2 minor warnings. The
+architecture (content-addressed blobs, incrementing node IDs, git-like backend)
+is consistent and clean. Below are findings ranked by severity.
+
+---
+
+## High Severity
+
+### 1. add_child_to contains dead `extra_parents` parameter
+
+**File:** src/lib.rs:345-376  
+**Impact:** Dead code, confusing interface
+
+`add_child_to()` accepts `extra_parents: &[&str]` and builds `all_parents` by
+combining `parent_hash` with these extras. It is **always called with `&[]`**
+(the only caller is `add()`, line 228). The parameter, the `for p in
+extra_parents` loop, and the `all_parents` vector construction serve no purpose.
+
+This is likely leftover from a planned feature where `dtr add process` could
+attach to multiple parents (like merge). If that feature is not planned, remove
+the parameter and simplify the function.
+
+**Fix:** Drop `extra_parents`, pass `&[parent_hash.as_str()]` directly to
+`create_node`. Removes ~8 lines of dead code.
+
+---
+
+## Medium Severity
+
+### 2. Duplicate RDS-save logic between run() and cache()
+
+**File:** src/lib.rs:688-740 (run), src/lib.rs:783-809 (cache)  
+**Impact:** Maintenance burden, risk of fix-one-miss-other bugs
+
+Both functions:
+1. Compose the R script (run can use cached variant, cache always full)
+2. Wrap with `wrap_r_script(libs, composed, tmp_rds)`
+3. Execute via `execute_r_script`
+4. Hash the RDS bytes, move tmp → final path
+5. Write `node.cache = Some(hash)`
+
+The only differences: `cache` ignores text output and returns the hash, while
+`run` returns text output and ignores the hash. The RDS handling (steps 4-5) is
+duplicated verbatim.
+
+**Fix:** Extract a `save_rds_cache(dir, hash, tmp_rds) -> Result<String, DtrError>`
+helper that does steps 4-5. Both callers pass the tmp path and get back the
+cache hash.
+
+---
+
+### 3. `marker_for_hash_in` takes `Option<&Map>` — errors silently swallowed
+
+**File:** src/lib.rs:614-625, callers at lines 271, 637, 975  
+**Impact:** Legitimate I/O errors (corrupt markers file) are silently ignored
+
+Every caller does `markers_read(dir).ok()` to convert `Result` → `Option`,
+then passes `Option<&Map>`. If the markers file is corrupt, this silently
+falls back to hash-based variable names (`p_<hash>`) or omits markers from
+`map()` output. The user gets subtly wrong results with no error.
+
+Since `markers_read` only fails for file-not-found or invalid JSON — both
+indicators of a broken project — these should probably be hard errors.
+
+**Fix:** Either:
+  (a) Change all callers to use `markers_read(dir)?` and make the functions take
+      `&Map` instead of `Option<&Map>` (propagates the error), or
+  (b) Have `markers_read` return an empty map on error instead of failing, and
+      drop the `Option` wrapper everywhere (treats missing/corrupt as empty).
+
+Option (b) is simpler and matches the "best effort" intent of the current code.
+
+---
+
+## Low Severity
+
+### 4. `compose_impl` uses function pointer for recursion
+
+**File:** src/lib.rs:627-668  
+**Impact:** Unconventional pattern, harder to follow for new contributors
+
+The `recurse: fn(&Path, &str) -> Result<String, DtrError>` parameter is passed
+through `compose_impl` so that `compose_node` and `compose_node_cached` can share
+the same body. While clever, this is unusual in Rust and the indirection makes
+the code harder to reason about. A simple `bool cached` flag with an early
+return for the cache-hit case would be more idiomatic and remove the need for
+two 3-line wrapper functions.
+
+**Audit1 note:** This was originally praised as a fix for code duplication.
+On reflection, the duplication was 3 lines versus a function pointer parameter
+that cascades through the entire compose recursion tree. The simpler approach
+would be an `enum ComposeMode { Full, Cached }` passed to a single function.
+
+**Fix:** Merge `compose_node` and `compose_node_cached` into one function with
+a `cached: bool` parameter. At the top of recursion, if `cached && node.cache
+exists on disk`, return the `readRDS(...)` string.
+
+---
+
+### 5. `resolve_ref` has deep nested if-let chains
+
+**File:** src/lib.rs:316-325  
+**Impact:** Readability, clippy warnings
+
+```
+if let Ok(markers) = markers_read(dir) {
+    if let Some(val) = markers.get(ref_str) {
+        if let Some(hash) = val.as_str() {
+            if path.exists() {
+                return Ok(hash.to_string());
+            }
+        }
+    }
+}
+```
+
+Three nested `if let` blocks. clippy flags this as collapsible.
+
+**Fix:** Flatten with `&&` chains:
+```rust
+if let Ok(markers) = markers_read(dir)
+    && let Some(val) = markers.get(ref_str)
+    && let Some(hash) = val.as_str()
+{
+    let path = dtr_path(dir).join("nodes").join(hash);
+    if path.exists() {
+        return Ok(hash.to_string());
+    }
+}
+```
+
+---
+
+### 6. `add_marker` duplicates `set_marker`
+
+**File:** src/lib.rs:1081-1090 (add_marker), src/lib.rs:298-303 (set_marker)  
+**Impact:** Minor maintenance concern
+
+`add_marker` reads markers, inserts, and writes. `set_marker` does the exact
+same thing. `add_marker` additionally verifies the node exists and reads CWN
+for the hash. These could share the write path.
+
+**Fix:** Have `add_marker` call `set_marker` for the actual write:
+```rust
+pub fn add_marker(dir: &Path, name: &str) -> Result<String, DtrError> {
+    let node_hash = cwn_read(dir)?;
+    node_read(dir, &node_hash)?;  // verify exists
+    set_marker(dir, &node_hash, name)?;
+    Ok(node_hash)
+}
+```
+
+---
+
+### 7. Public read wrappers for testing are unnecessary indirection
+
+**File:** src/lib.rs:458-472  
+**Impact:** Public API surface bloat
+
+`read_blob`, `read_cwn`, `read_node` are documented as "for testing" but are
+public functions that trivially wrap internal functions. Tests already have
+access to `node_read`, `cwn_read` etc. via `use super::*`. These wrappers
+provide no additional value.
+
+**Fix:** Remove the wrappers, call the internal functions directly in tests (they
+are already imported via `use super::*`).
+
+---
+
+### 8. `compose()` doc comment says "reverses the order" — incorrect
+
+**File:** src/lib.rs:604-605  
+**Impact:** Misleading documentation
+
+The doc says "Performs a DFS from the current node upward through parents,
+reverses the order to produce a top-down pipe chain." But the implementation
+uses `compose_impl` which recurses upward and builds the chain in the correct
+top-down order during the recursive return — no reversal step exists.
+
+**Fix:** Remove "reverses the order" from the doc comment.
+
+---
+
+### 9. `auto_marker_name` has unbounded loop
+
+**File:** src/lib.rs:195-203  
+**Impact:** Theoretically hangs if 2^64 markers with the same prefix exist
+
+From audit1, marked as "deferred (practically impossible)." Still technically
+unbounded. Adding an upper bound and returning an error after, say, 1000
+iterations would be low-cost defense.
+
+---
+
+### 10. Inconsistent error message style
+
+**File:** src/lib.rs:46-57 (Display impl)  
+**Impact:** Minor inconsistency
+
+- `NoCurrentNode`: lowercase, no period — "no current working node (CWN is empty)"
+- `NodeNotFound`: lowercase, no period — "node not found: {h}"
+- `InvalidState`: lowercase, no period — "invalid state: {s}"
+- `RExecError`: has newline — "R error:\n{s}"
+
+Most messages start with a lowercase letter (good for CLI error display). The
+`RExecError` prefix is redundant since stderr already shows R's output.
+
+---
+
+## Observation: Code Quality Metrics
+
+- **Lines:** 3,525 (lib) + 381 (main) = 3,906 total
+- **Tests:** 128 (all passing)
+- **Clippy warnings:** 2 (minor, collapsible ifs)
+- **Dead code:** 1 confirmed (extra_parents), 0 compiler warnings
+- **Functions:** ~45 (well-factored)
+- **Error variants:** 6 (appropriate for the domain)
+- **Dependencies:** sha1, serde, serde_json, clap, hex (minimal)
+
+## Recommendations
+
+**Priority fixes (this week):**
+1. Remove dead `extra_parents` parameter from `add_child_to`
+2. Extract shared RDS-save logic from `run()` and `cache()`
+
+**Nice-to-have (this month):**
+3. Flatten `resolve_ref` if-let chains
+4. Fix `marker_for_hash_in` silent error swallowing
+5. Fix compose() doc comment
+6. Refactor `add_marker` to use `set_marker`
+
+**Consider (when convenient):**
+7. Simplified compose recursion (enum vs fn pointer)
+8. Remove test-only public wrappers
+9. Bound `auto_marker_name` loop
