@@ -482,56 +482,34 @@ pub fn read_current(dir: &Path) -> Result<String, DtrError> {
 }
 
 /// Replace the R code of the current working node.
-/// Returns the hash of the updated node (may differ from old hash since
-/// node content changed). Updates parent/child references throughout the graph
-/// and clears stale caches on the node and all descendants.
+///
+/// Mutates the node in-place: updates the blob reference, clears the
+/// cache, and invalidates all descendant caches. The node ID does not
+/// change, so parent/child references and markers remain valid.
+/// Returns the node hash (unchanged unless the code is identical).
 pub fn write_current(dir: &Path, code: &str) -> Result<String, DtrError> {
-    let old_hash = cwn_read(dir)?;
-    let old_node = node_read(dir, &old_hash)?;
+    let hash = cwn_read(dir)?;
+    let mut node = node_read(dir, &hash)?;
 
     // Write new blob (content-addressable, no-op if blob already exists)
     let new_blob_hash = blob_write(dir, code)?;
 
     // If the code hasn't changed, nothing to do
-    if new_blob_hash == old_node.blob {
-        return Ok(old_hash);
+    if new_blob_hash == node.blob {
+        return Ok(hash.clone());
     }
 
-    // Build new node with updated blob and cleared cache
-    let new_node = Node {
-        blob: new_blob_hash,
-        cache: None,
-        ..old_node.clone()
-    };
+    // Mutate in-place: update blob, clear cache
+    node.blob = new_blob_hash;
+    node.cache = None;
+    node_write(dir, &hash, &node)?;
 
-    let new_hash = next_node_id(dir)?;
-    let json = serde_json::to_string(&new_node)?;
-    fs::write(dtr_path(dir).join("nodes").join(&new_hash), &json)?;
-
-    // Update parent nodes: replace old_hash with new_hash in children lists
-    for parent_hash in &new_node.parents {
-        let mut parent = node_read(dir, parent_hash)?;
-        if let Some(pos) = parent.children.iter().position(|c| c == &old_hash) {
-            parent.children[pos] = new_hash.clone();
-            node_write(dir, parent_hash, &parent)?;
-        }
-    }
-
-    // Update child nodes: replace old_hash with new_hash in parents lists,
-    // and recursively clear all descendant caches (they are now stale)
-    for child_hash in &new_node.children {
-        let mut child = node_read(dir, child_hash)?;
-        if let Some(pos) = child.parents.iter().position(|p| p == &old_hash) {
-            child.parents[pos] = new_hash.clone();
-            node_write(dir, child_hash, &child)?;
-        }
+    // Invalidate all descendant caches (they are now stale)
+    for child_hash in &node.children {
         clear_descendant_caches(dir, child_hash)?;
     }
 
-    // Update CWN to point to the new node
-    cwn_write(dir, &new_hash)?;
-
-    Ok(new_hash)
+    Ok(hash)
 }
 
 /// Recursively clear all cached outputs from a node and its descendants.
@@ -2015,14 +1993,14 @@ mod tests {
         let hash = add_input(&dir, original, None).expect("add input");
 
         let new_code = "read_csv('updated.csv')";
-        let new_hash = write_current(&dir, new_code).expect("write current");
+        let returned_hash = write_current(&dir, new_code).expect("write current");
 
         // New code should be readable
         let result = read_current(&dir).expect("read after write");
         assert_eq!(result, new_code, "should return the new code");
 
-        // Node hash should have changed (content changed)
-        assert_ne!(new_hash, hash, "write should produce a new node hash");
+        // Node hash stays the same (in-place mutation)
+        assert_eq!(returned_hash, hash, "write mutates in-place, hash stays same");
 
         // Old blob should still exist (content-addressable, not garbage-collected)
         let old_blob_hash = hash_string(original);
@@ -2032,9 +2010,13 @@ mod tests {
         let new_blob_hash = hash_string(new_code);
         assert!(dtr_path(&dir).join("blobs").join(&new_blob_hash).exists(), "new blob should exist");
 
-        // CWN should point to new node
+        // Node's blob reference should be updated
+        let node = read_node(&dir, &hash).expect("read node");
+        assert_eq!(node.blob, new_blob_hash, "node blob should reference new code");
+
+        // CWN should still point to the same node
         let cwn = read_cwn(&dir).expect("read cwn");
-        assert_eq!(cwn, new_hash, "CWN should point to new node");
+        assert_eq!(cwn, hash, "CWN should point to same node");
     }
 
     #[test]
@@ -2044,13 +2026,13 @@ mod tests {
         let code = "read_csv('data.csv')";
         let hash = add_input(&dir, code, None).expect("add input");
 
-        let new_hash = write_current(&dir, code).expect("write same code");
-        assert_eq!(new_hash, hash, "writing same code should produce same hash");
+        let returned_hash = write_current(&dir, code).expect("write same code");
+        assert_eq!(returned_hash, hash, "writing same code returns same hash");
     }
 
     #[test]
-    fn test_write_updates_parent_children() {
-        let dir = setup("write_parent_child");
+    fn test_write_keeps_parent_child_references_intact() {
+        let dir = setup("write_refs_intact");
 
         let input_code = "read_csv('data.csv')";
         let input_hash = add_input(&dir, input_code, None).expect("add input");
@@ -2058,54 +2040,27 @@ mod tests {
         let chart_code = "ggplot(aes(x, y)) + geom_point()";
         let chart_hash = add(&dir, "chart", chart_code, None).expect("add chart");
 
-        // Move CWN back to the input node before writing
+        // Move CWN back to the input node and write new code
         cwn_write(&dir, &input_hash).expect("write cwn back to input");
-
-        // Now write new code to the input node
         let new_code = "read_csv('updated.csv')";
-        let new_input_hash = write_current(&dir, new_code).expect("write input");
+        write_current(&dir, new_code).expect("write input");
 
-        // CWN is now at new_input_hash. Chart's parent should point to new input hash.
+        // Chart's parent should still be input_hash (in-place, no ID change)
         let chart = read_node(&dir, &chart_hash).expect("read chart");
-        assert!(
-            chart.parents.contains(&new_input_hash),
-            "chart's parent should be updated to new input hash"
-        );
-        assert!(
-            !chart.parents.contains(&input_hash),
-            "chart's parent should no longer point to old input hash"
+        assert_eq!(
+            chart.parents, vec![input_hash.clone()],
+            "chart's parent reference is unchanged"
         );
 
-    }
-
-    #[test]
-    fn test_write_updates_child_parents() {
-        let dir = setup("write_child_parent");
-
-        let input_code = "read_csv('data.csv')";
-        let input_hash = add_input(&dir, input_code, None).expect("add input");
-
-        let chart_code = "ggplot(aes(x, y)) + geom_point()";
-        let chart_hash = add(&dir, "chart", chart_code, None).expect("add chart");
-
-        // We are at the chart node. Write new code to it.
-        let new_code = "ggplot(aes(x, y)) + geom_smooth()";
-        let new_chart_hash = write_current(&dir, new_code).expect("write chart");
-
-        // Input's children should now point to the new chart hash
+        // Input's children should still be chart_hash
         let input = read_node(&dir, &input_hash).expect("read input");
-        assert!(
-            input.children.contains(&new_chart_hash),
-            "input's children should include new chart hash"
-        );
-        assert!(
-            !input.children.contains(&chart_hash),
-            "input's children should not include old chart hash"
+        assert_eq!(
+            input.children, vec![chart_hash.clone()],
+            "input's children reference is unchanged"
         );
 
-        // New chart's parents should point to input
-        let new_chart = read_node(&dir, &new_chart_hash).expect("read new chart");
-        assert_eq!(new_chart.parents, vec![input_hash], "new chart parent should be input");
+        // CWN should still point to input_hash
+        assert_eq!(read_cwn(&dir).unwrap(), input_hash, "CWN unchanged");
     }
 
     #[test]
