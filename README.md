@@ -32,7 +32,7 @@ DTR solves this by making each analysis step a standalone node:
 - **Cache everything** — intermediate results are saved as RDS, so re-running only recomputes what changed
 - **LLM-friendly** — Tool is designed with agentic use in mind, via the DTR-USE skill.
 
-## Project Roadmap --- HUMAN ONLY WRITING:
+## Project Roadmap:
 Basically I wanted to build something that is to R-markdown what R-markdown is to pure R (or jupyter notebook to a python script). Cell-based notebook analysis is a great tool for data analysts: you get to experiment, view intermediate outputs, try stuff out. It's more natural to use, while still keeping a record of what you're doing. You don't need to rerun intensive processes that are unchanged in your code
 
 But the limitations are real too. Verifying the methodology of one chart can require reading through a large mono notebook of analysis. Often, larger teams break up their analysis & model building into multiple notebooks & pipelines, where intermediate outputs are stored and whose lineage is carefully tracked, to ensure downstream users are properly using. Code gets replicated across notebooks on a single project, so that analysts can branch and try multiple ideas flexibly.
