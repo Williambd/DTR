@@ -1,0 +1,102 @@
+# DTR Code Audit — May 2026
+
+## 🔴 High severity
+
+### 1. compose_node / compose_node_cached are ~95% duplicated
+Location: ~lines 635–710 and ~750–815
+
+These two functions differ only in two places: the recursive call target
+(compose_node vs compose_node_cached) and the cache check at the top.
+The multi-parent (merge) branch is copy-pasted character-for-character.
+
+Why it matters: Any bug fix, format change, or logic tweak in compose must be
+applied identically to both. This is the classic source of divergent behavior bugs.
+
+Fix: Extract the shared body into a single function that takes the recursive
+call as a fn pointer or closure:
+
+  fn compose_impl(
+      dir: &Path,
+      hash: &str,
+      recurse: fn(&Path, &str) -> Result<String, DtrError>,
+  ) -> Result<String, DtrError>
+
+### 2. Cache format collision: dtr cache stores text, dtr run stores binary RDS
+Both write to node.cache.
+
+dtr cache reads cwnout (text), hashes it, stores text in cache/<hash>, and
+writes node.cache = Some(text_hash).
+dtr run runs R, saves binary RDS to cache/<hash>, and writes
+node.cache = Some(rds_hash).
+
+If a user runs dtr cache after dtr run, the text hash overwrites the RDS hash.
+The next dtr run (no -r) will call readRDS('cache/<text_hash>') on a text
+file — R will error at runtime.
+
+## 🟡 Medium severity
+
+### 3. now_iso8601() — 45-line manual date calculation
+A hand-rolled leap-year-aware Gregorian calendar formatter. It works now, but:
+- It's the single most complex function in the codebase
+- Hard to audit for edge cases (month boundaries, leap years in centuries)
+- No test verifies it produces correct dates for edge cases (Feb 29, Dec 31, etc.)
+- A 1-line chrono call (Utc::now().to_rfc3339()) would replace it entirely
+
+### 4. marker_for_hash reads and parses markers file on every call
+Called inside tight loops in derive_parent_var (called from add_merge), and
+inside compose_node/compose_node_cached for each side parent. For a DAG with
+3 nested merges, this can mean 6+ redundant file reads and JSON parses per
+compose. The markers file is small but I/O is slow.
+
+Fix: Cache markers in memory for the duration of the operation.
+
+### 5. execute_r_script uses std::process::id() for temp file uniqueness
+    let tmp = std::env::temp_dir().join(format!("dtr_run_{}.R", std::process::id()));
+
+In a process that calls run() multiple times (e.g., a test runner or
+embedding), two concurrent calls will step on each other's temp file.
+
+## 🟢 Low severity
+
+### 6. delete_current doesn't clean up cache files
+When a node is deleted, its cache/<hash> file is orphaned on disk forever.
+Over time, stale caches accumulate. Not a correctness issue, but a disk
+hygiene one.
+
+### 7. No dedicated R-execution error variant
+R failures use InvalidState("R error:\n{stderr}"). A caller can't
+programmatically distinguish "R script failed" from "user tried to goto ..
+on a merge node" without parsing error strings.
+
+### 8. auto_marker_name has an unbounded loop
+If all input_N names from 1 to 2^63 were somehow taken, it loops forever.
+Practically impossible, but defensively worth a bound.
+
+### 9. init returns std::io::Result instead of DtrError
+It's the only public function using a different error type, forcing main.rs
+to convert via .map_err(dtr::DtrError::Io). Not wrong, just inconsistent.
+
+### 10. hash_string and hash_bytes import sha1::Digest inside the function body
+Unusual Rust idiom. Not a bug, but reads oddly. Moving the import to the top
+of the module alongside the other use items is more conventional.
+
+---
+
+## Summary table
+
+| # | Issue | Category |
+|---|-------|----------|
+| 1 | compose_node / compose_node_cached duplication | Maintainability |
+| 2 | dtr cache (text) vs dtr run (RDS) cache collision | Correctness |
+| 3 | Manual now_iso8601() date calculation | Complexity |
+| 4 | Redundant marker_for_hash I/O in loops | Performance |
+| 5 | PID-based temp file in execute_r_script | Correctness (concurrency) |
+| 6 | No cache cleanup on delete | Hygiene |
+| 7 | No dedicated R-exec error variant | API design |
+| 8 | Unbounded auto_marker_name loop | Robustness |
+| 9 | Inconsistent init error type | Consistency |
+| 10 | Unusual use placement in hash_* | Style |
+
+The codebase is otherwise solid — clean separation of concerns, good test
+coverage (93 tests), consistent patterns, and clear naming. No outright
+bugs found. Issues 1 and 2 are the ones worth addressing first.
